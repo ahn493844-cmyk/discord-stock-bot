@@ -8,6 +8,7 @@ const {
 const game = require('./game');
 const { findAsset, unitOf } = require('./assets');
 const { quote } = require('./market');
+const { pagesImage } = require('./v2');
 
 const { won, fmtQty } = game;
 const COLOR_BUY = 0xe03131;
@@ -80,7 +81,9 @@ function noticeEmbed(notice) {
   return notice ? new EmbedBuilder().setColor(notice.error ? COLOR_ERR : COLOR_OK).setDescription(notice.text) : null;
 }
 
-function pack(notice, embed, components) {
+function pack(notice, embed, components, state, asset) {
+  const icon = state && asset ? pagesImage(state, `icon_${asset.id}`) : null;
+  if (icon) embed.setThumbnail(icon);
   const n = noticeEmbed(notice);
   return { embeds: n ? [n, embed] : [embed], components };
 }
@@ -144,7 +147,7 @@ function buyTicket(state, user, assetId, mode = 'cash', qtyIn = 0, now = Date.no
       const ha = sim.after.account.holdings[asset.id];
       const myMoney = r.cost - (r.loan ? r.loan.amount : 0) + r.fee;
       e.addFields(
-        { name: '📝 주문', value: `${fmtQty(asset, qty)} × ${won(price)}\n= **${won(r.cost)}**`, inline: true },
+        { name: '📝 주문', value: `${fmtQty(asset, qty)} × ${won(price)} = **${won(r.cost)}**`, inline: true },
         { name: '💸 내 돈 지출', value: `**${won(myMoney)}**\n(수수료 ${won(r.fee)} 포함)`, inline: true },
         {
           name: '💳 대출',
@@ -182,7 +185,7 @@ function buyTicket(state, user, assetId, mode = 'cash', qtyIn = 0, now = Date.no
       btn(id('xb', asset.id, m, qtyStr(asset, qty)), canRun ? `${fmtQty(asset, qty)} 매수 실행` : '매수 실행', ButtonStyle.Danger, { emoji: '✅', disabled: !canRun }),
       backBtn(asset),
     ),
-  ]);
+  ], state, asset);
 }
 
 // ── 매도 주문창 ──────────────────────────────────────────────
@@ -214,7 +217,7 @@ function sellTicket(state, user, assetId, qtyIn = 0, now = Date.now(), notice = 
       const r = sim.result;
       const ha = sim.after.account.holdings[asset.id];
       e.addFields(
-        { name: '📝 주문', value: `${fmtQty(asset, qty)} × ${won(r.price)}\n= ${won(r.revenue)}`, inline: true },
+        { name: '📝 주문', value: `${fmtQty(asset, qty)} × ${won(r.price)} = ${won(r.revenue)}`, inline: true },
         { name: '💰 받을 돈', value: `**${won(r.revenue - r.fee)}**\n(수수료 ${won(r.fee)} 제외)`, inline: true },
         { name: r.profit >= 0 ? '🟥 실현 이익' : '🟦 실현 손실', value: `**${signedWon(r.profit)}**\n(${signedPct((r.profit / (h.avgPrice * qty)) * 100)})`, inline: true },
         {
@@ -235,7 +238,7 @@ function sellTicket(state, user, assetId, qtyIn = 0, now = Date.now(), notice = 
       btn(id('xs', asset.id, qtyStr(asset, qty)), canRun ? `${fmtQty(asset, qty)} 매도 실행` : '매도 실행', ButtonStyle.Primary, { emoji: '✅', disabled: !canRun }),
       backBtn(asset),
     ),
-  ]);
+  ], state, asset);
 }
 
 // ── 선물 주문창 ──────────────────────────────────────────────
@@ -317,7 +320,7 @@ function futuresTicket(state, user, assetId, side = 'long', levIn = 5, marginIn 
       btn(id('xf', asset.id, s, String(lev), String(margin)), canRun ? `${won(margin)} ${s === 'long' ? '롱' : '숏'} 진입 실행` : '진입 실행', ButtonStyle.Danger, { emoji: '✅', disabled: !canRun }),
       backBtn(asset),
     ),
-  ]);
+  ], state, asset);
 }
 
 // ── 옵션 주문창 ──────────────────────────────────────────────
@@ -400,7 +403,7 @@ function optionTicket(state, user, assetId, kind = 'call', expiry = '1d', offIn 
       btn(id('xo', asset.id, k, exp, String(off), qs), canRun ? `${fmtQty(asset, qty)}분 옵션 매수 실행` : '옵션 매수 실행', ButtonStyle.Danger, { emoji: '✅', disabled: !canRun }),
       backBtn(asset),
     ),
-  ]);
+  ], state, asset);
 }
 
 // ── 직접 입력 팝업 ───────────────────────────────────────────

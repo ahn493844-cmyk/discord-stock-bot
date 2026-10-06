@@ -8,8 +8,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { ASSETS } = require('../../src/assets');
-const { renderChart } = require('./render');
+const { ASSETS, CATEGORIES, BOARD_PAGE_SIZE, HOME_HEATMAP, findAsset } = require('../../src/assets');
+const { toKrw } = require('../../src/prices');
+const { renderChart, renderIcon, renderBoard, renderHeatmap } = require('./render');
 
 const OUT = path.join(__dirname, 'site');
 const CACHE = path.join(__dirname, '.cache');
@@ -110,7 +111,9 @@ async function collect(asset, now) {
       cache.weekly = { at: now, points: await upbitCandles(asset.ticker, 'weeks', 52) };
     }
     const last = intraday[intraday.length - 1];
-    if (last) quote = { raw: last.c, prevCloseRaw: null, time: last.t, period: null };
+    const days = (cache.daily && cache.daily.points) || [];
+    const prev = days.length >= 2 ? days[days.length - 2].c : null; // 마지막 일봉은 오늘 진행 중
+    if (last) quote = { raw: last.c, prevCloseRaw: prev, time: last.t, period: null };
   } else {
     const r = await yahooChart(asset.ticker, '5d', '15m');
     intraday = r.points;
@@ -159,7 +162,7 @@ function sampleSeries(seed, base, n, stepMs, now) {
 }
 
 async function collectSample(asset, now, i) {
-  const base = { USD: 200, JPY: 40000 }[asset.currency] || 70000;
+  const base = { USD: 1400, JPY: 9.5, EUR: 1600 }[asset.id] ?? ({ USD: 200, JPY: 40000 }[asset.currency] || 70000);
   const series = {
     '1d': sampleSeries(i + 1, base, 26, 15 * 60e3, now),
     '1w': sampleSeries(i + 2, base, 130, 60 * 60e3, now),
@@ -178,9 +181,9 @@ async function main() {
   fs.mkdirSync(path.join(OUT, 'data'), { recursive: true });
   fs.mkdirSync(CACHE, { recursive: true });
 
-  const targets = SAMPLE
-    ? ASSETS.filter((a) => ['005930', 'AAPL', 'BTC', 'CL', 'N225', 'GOLD'].includes(a.id))
-    : ASSETS;
+  const targets = ASSETS;
+  const SAMPLE_CHARTS = new Set(['005930', 'AAPL', 'BTC', 'CL', 'N225', 'GOLD']);
+  const sparks = {};
   const quotes = {};
   const errors = [];
   let charts = 0;
@@ -197,6 +200,8 @@ async function main() {
       try {
         const r = SAMPLE ? await collectSample(asset, now, i) : await collect(asset, now);
         if (r.quote && r.quote.raw > 0) quotes[asset.id] = r.quote;
+        sparks[asset.id] = (r.series['1d'] || []).map((p) => p.c);
+        if (SAMPLE && !SAMPLE_CHARTS.has(asset.id)) continue;
         for (const [range, pts] of Object.entries(r.series)) {
           const png = renderChart({
             name: asset.name, id: asset.id, currency: asset.currency, range, points: SAMPLE ? pts : scale(asset, pts),
@@ -217,6 +222,33 @@ async function main() {
   if (quotes.USD) fx.USD = quotes.USD.raw;
   if (quotes.JPY) fx.JPY = quotes.JPY.raw;
 
+  // 아이콘·시세판·히트맵
+  const stamp = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+  const view = (a) => {
+    const q = quotes[a.id];
+    const price = q ? toKrw(a, q.raw, fx) : null;
+    const change = q && q.prevCloseRaw ? ((q.raw - q.prevCloseRaw) / q.prevCloseRaw) * 100 : null;
+    return { asset: a, price, change, spark: sparks[a.id] };
+  };
+  let extras = 0;
+  for (const a of targets) {
+    fs.writeFileSync(path.join(OUT, 'charts', `icon_${a.id}.png`), renderIcon(a));
+    extras++;
+  }
+  for (const [cat, label] of Object.entries(CATEGORIES)) {
+    const list = targets.filter((a) => a.category === cat);
+    const pages = Math.ceil(list.length / BOARD_PAGE_SIZE);
+    for (let p = 0; p < pages; p++) {
+      const rows = list.slice(p * BOARD_PAGE_SIZE, (p + 1) * BOARD_PAGE_SIZE).map(view);
+      fs.writeFileSync(path.join(OUT, 'charts', `board_${cat}_${p}.png`),
+        renderBoard(`${label}${pages > 1 ? ` (${p + 1}/${pages})` : ''}`, rows, `전일 종가 대비 · 원화 환산 · ${stamp} 기준`));
+      extras++;
+    }
+  }
+  const heat = HOME_HEATMAP.map(findAsset).filter(Boolean).map(view);
+  fs.writeFileSync(path.join(OUT, 'charts', 'heat_home.png'), renderHeatmap('오늘의 시장', heat, 5, `전일 종가 대비 · ${stamp} 기준`));
+  extras++;
+
   const generatedAt = Date.now();
   fs.writeFileSync(path.join(OUT, 'data', 'quotes.json'), JSON.stringify({ generatedAt, fx, quotes }));
   fs.writeFileSync(path.join(OUT, 'index.html'), `<!doctype html><meta charset="utf-8"><title>주식봇 시세</title>
@@ -225,7 +257,7 @@ async function main() {
 ${targets.map((a) => `<p>${a.name} (${a.id}) <a href="charts/${a.id}_1d.png">1일</a> <a href="charts/${a.id}_1w.png">1주</a> <a href="charts/${a.id}_1m.png">1달</a> <a href="charts/${a.id}_1y.png">1년</a></p>`).join('\n')}
 </body>`);
 
-  console.log(`시세 ${Object.keys(quotes).length}/${targets.length} · 차트 ${charts}장 · 실패 ${errors.length} · ${((Date.now() - started) / 1000).toFixed(0)}초`);
+  console.log(`시세 ${Object.keys(quotes).length}/${targets.length} · 차트 ${charts}장 · 그래픽 ${extras}장 · 실패 ${errors.length} · ${((Date.now() - started) / 1000).toFixed(0)}초`);
   if (errors.length) console.log(errors.slice(0, 30).join('\n'));
   // 절반 넘게 실패하면 배포하지 않도록 실패 처리 (기존 Pages가 유지됨)
   if (Object.keys(quotes).length < targets.length / 2) process.exit(1);

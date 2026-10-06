@@ -4,6 +4,7 @@ const { SlashCommandBuilder, InteractionContextType, MessageFlags } = require('d
 const game = require('./game');
 const ui = require('./ui');
 const tickets = require('./tickets');
+const { render } = require('./v2');
 const { findAsset, searchAssets } = require('./assets');
 const { quote } = require('./market');
 
@@ -39,7 +40,8 @@ async function handleCommand(interaction, { state }) {
   const view = asset
     ? ui.assetView(state, interaction.user, asset.id, '1d', now)
     : ui.homeView(state, interaction.user, now, target ? { error: true, text: '⚠️ 종목을 찾지 못해서 홈을 열었어요.' } : null);
-  await interaction.reply({ ...view, flags: MessageFlags.Ephemeral });
+  const msg = render(view);
+  await interaction.reply({ ...msg, flags: msg.flags | MessageFlags.Ephemeral });
   return true;
 }
 
@@ -50,7 +52,7 @@ async function handleComponent(interaction, { state }) {
   const gid = interaction.guildId;
   const [, action, ...args] = interaction.customId.split('|');
   const values = interaction.isStringSelectMenu() ? interaction.values : [];
-  const show = (view) => interaction.update(view);
+  const show = (view) => interaction.update(render(view));
   let changed = false;
 
   // 주문창·실행 버튼은 첫 인자가 종목 코드
@@ -184,7 +186,7 @@ async function handleComponent(interaction, { state }) {
         embed = ui.rankingEmbed(state, args[1], gid, now);
       }
       embed.setFooter({ text: `${user.displayName ?? user.username}님이 공유 · /주식 으로 직접 해 보세요` });
-      await interaction.reply({ embeds: [embed], allowedMentions: { parse: [] } });
+      await interaction.reply(render({ embeds: [embed], allowedMentions: { parse: [] } }));
       break;
     }
     default:
@@ -208,9 +210,12 @@ async function handleModal(interaction, { state }) {
     }
   };
   // 버튼이 있던 화면에서 연 팝업이면 그 화면을 바꾸고, 아니면 나만 보이는 새 화면으로
-  const show = (view) => (interaction.isFromMessage()
-    ? interaction.update(view)
-    : interaction.reply({ ...view, flags: MessageFlags.Ephemeral }));
+  const show = (view) => {
+    const msg = render(view);
+    return interaction.isFromMessage()
+      ? interaction.update(msg)
+      : interaction.reply({ ...msg, flags: msg.flags | MessageFlags.Ephemeral });
+  };
 
   if (action === 'm_search') {
     const q = text('q');

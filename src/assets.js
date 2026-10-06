@@ -215,4 +215,13 @@ function unitOf(asset) {
   return (asset && asset.unit) || '주';
 }
 
-module.exports = { ASSETS, CATEGORIES, findAsset, searchAssets, unitOf };
+// 목록 화면 한 페이지 종목 수 (GitHub에서 그리는 시세판 이미지와 같아야 함)
+const BOARD_PAGE_SIZE = 20;
+// 홈 화면 히트맵에 나오는 주요 종목
+const HOME_HEATMAP = ['KS200', 'KOSDAQ', 'ES', 'NQ', 'N225', '005930', '000660', 'AAPL', 'NVDA', 'TSLA', 'BTC', 'ETH', 'CL', 'GOLD', 'USD'];
+
+function boardPages(category) {
+  return Math.max(1, Math.ceil(ASSETS.filter((a) => a.category === category).length / BOARD_PAGE_SIZE));
+}
+
+module.exports = { ASSETS, CATEGORIES, findAsset, searchAssets, unitOf, BOARD_PAGE_SIZE, HOME_HEATMAP, boardPages };

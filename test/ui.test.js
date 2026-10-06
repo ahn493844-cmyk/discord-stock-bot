@@ -23,40 +23,59 @@ const user = { id: 'u1', username: 'tester', displayName: '테스터', bot: fals
 
 const toJSON = (x) => (x && typeof x.toJSON === 'function' ? x.toJSON() : x);
 
-// 디스코드 메시지 제한 검사
-function checkMessage(msg, where) {
-  const embeds = (msg.embeds || []).map(toJSON);
-  let total = 0;
-  for (const e of embeds) {
-    total += (e.title || '').length + (e.description || '').length + (e.footer?.text || '').length + (e.author?.name || '').length;
-    assert.ok((e.description || '').length <= 4096, `${where}: 설명 4096자 초과`);
-    assert.ok((e.fields || []).length <= 25, `${where}: 필드 25개 초과`);
-    for (const f of e.fields || []) {
-      assert.ok(f.value.length <= 1024 && f.value.length > 0, `${where}: 필드 값 길이 ${f.value.length}`);
-      assert.ok(f.name.length <= 256, `${where}: 필드 이름 초과`);
-      total += f.name.length + f.value.length;
-    }
+// 디스코드 메시지 제한 검사 (Components V2)
+const TYPE = { row: 1, button: 2, select: 3, section: 9, text: 10, thumb: 11, gallery: 12, sep: 14, container: 17 };
+
+function walk(components, visit) {
+  for (const c of components) {
+    visit(c);
+    if (c.components) walk(c.components, visit);
+    if (c.accessory) walk([c.accessory], visit);
   }
-  assert.ok(total <= 6000, `${where}: 임베드 전체 ${total}자`);
-  const rows = (msg.components || []).map(toJSON);
-  assert.ok(rows.length <= 5, `${where}: 줄 ${rows.length}개`);
+}
+
+function checkMessage(msg, where) {
+  assert.ok(msg.flags & 32768, `${where}: Components V2 플래그 없음`);
+  assert.ok(!msg.embeds || !msg.embeds.length, `${where}: V2 메시지에 embeds`);
+  const top = (msg.components || []).map(toJSON);
+  assert.ok(top.length >= 1 && top.length <= 10, `${where}: 최상위 ${top.length}개`);
+  let count = 0;
+  let textLen = 0;
+  const rows = [];
   const ids = new Set();
-  for (const r of rows) {
-    assert.ok(r.components.length >= 1 && r.components.length <= 5, `${where}: 한 줄 컴포넌트 ${r.components.length}개`);
-    for (const c of r.components) {
+  const texts = [];
+  const images = [];
+  walk(top, (c) => {
+    count++;
+    if (c.type === TYPE.text) {
+      assert.ok(c.content.length > 0, `${where}: 빈 텍스트`);
+      textLen += c.content.length;
+      texts.push(c.content);
+    }
+    if (c.type === TYPE.gallery) for (const it of c.items) images.push(it.media.url);
+    if (c.type === TYPE.thumb) images.push(c.media.url);
+    if (c.type === TYPE.section) {
+      assert.ok(c.components.length >= 1 && c.components.length <= 3, `${where}: 섹션 텍스트 개수`);
+      assert.ok(c.accessory, `${where}: 섹션 accessory 없음`);
+    }
+    if (c.type === TYPE.row) {
+      rows.push(c);
+      assert.ok(c.components.length >= 1 && c.components.length <= 5, `${where}: 한 줄 컴포넌트 ${c.components.length}개`);
+    }
+    if (c.type === TYPE.button || c.type === TYPE.select) {
       assert.ok(c.custom_id && c.custom_id.length <= 100, `${where}: custom_id ${c.custom_id}`);
       assert.ok(!ids.has(c.custom_id), `${where}: custom_id 중복 ${c.custom_id}`);
       ids.add(c.custom_id);
       if (c.label) assert.ok(c.label.length <= 80, `${where}: 버튼 라벨 길이`);
       if (c.options) {
         assert.ok(c.options.length >= 1 && c.options.length <= 25, `${where}: 선택지 ${c.options.length}개`);
-        for (const o of c.options) {
-          assert.ok(o.label.length <= 100 && (o.description || '').length <= 100, `${where}: 선택지 길이`);
-        }
+        for (const o of c.options) assert.ok(o.label.length <= 100 && (o.description || '').length <= 100, `${where}: 선택지 길이`);
       }
     }
-  }
-  return { embeds, rows, ids };
+  });
+  assert.ok(count <= 40, `${where}: 컴포넌트 ${count}개 (최대 40)`);
+  assert.ok(textLen <= 4000, `${where}: 텍스트 ${textLen}자 (최대 4000)`);
+  return { rows, ids, texts, images, text: texts.join('\n') };
 }
 
 function checkModal(modal, where) {
@@ -79,7 +98,7 @@ function harness(state) {
   const base = (extra) => ({
     user, guildId: 'g1', replied: false, deferred: false,
     reply: async (m) => {
-      if (m.flags) screen = m;
+      if (m.flags & 64) screen = m; // 64 = 나만 보이는 메시지
       else shared.push(m);
     },
     update: async (m) => { screen = m; },
@@ -122,7 +141,11 @@ function harness(state) {
       return checkMessage(screen, `모달 ${customId}`);
     },
     notice() {
-      return toJSON(screen.embeds[0]).description || '';
+      // 맨 위 카드(알림)의 글자
+      const first = toJSON(screen.components[0]);
+      const out = [];
+      walk([first], (c) => { if (c.type === TYPE.text) out.push(c.content); });
+      return out.join('\n');
     },
   };
 }
@@ -143,9 +166,10 @@ test('홈 → 분류 → 페이지 이동 → 종목 → 차트 기간 전환', 
     if (list.ids.has(`stk|list|${cat}|1`)) await h.click(`stk|list|${cat}|1`);
   }
   const asset = await h.pick('stk|pick|kr', '005930');
-  assert.match(asset.embeds[0].image.url, /charts\/005930_1d\.png\?v=/);
+  assert.ok(asset.images.some((u) => /charts\/005930_1d\.png\?v=/.test(u)), asset.images.join());
+  assert.ok(asset.images.some((u) => /icon_005930/.test(u)));
   const w = await h.click('stk|a|005930|1w');
-  assert.match(w.embeds[0].image.url, /005930_1w/);
+  assert.ok(w.images.some((u) => /005930_1w/.test(u)));
   await h.click('stk|a|005930|1y|refresh');
   await h.click('stk|list|kr|0');
   await h.click('stk|home');
@@ -159,7 +183,7 @@ test('모든 종목 화면이 제한을 지킨다', async () => {
 });
 
 // 화면의 모든 필드 텍스트를 한 줄로
-const fieldsText = (screen) => screen.embeds.map(toJSON).map((e) => [e.title, e.description, ...(e.fields || []).map((f) => `${f.name}=${f.value}`)].join(' ')).join(' ');
+const fieldsText = (screen) => checkMessage(screen, '본문').text;
 const findId = (r, prefix) => [...r.ids].find((x) => x.startsWith(prefix));
 
 test('매수 주문창: 버튼으로 수량을 고르면 미리보기만 바뀌고, 실행해야 체결된다', async () => {
@@ -238,7 +262,7 @@ test('선물 주문창: 레버리지·방향·증거금 → 청산가와 손익 
   assert.strictEqual(game.getUser(state, 'u1').futures.length, 1);
   await h.click('stk|qi|f|BTC|long|10');
   await h.submit('stk|mq|f|BTC|long|10', { v: '5만' });
-  assert.ok(findId({ ids: new Set(h.screen.components.map(toJSON).flatMap((r) => r.components.map((c) => c.custom_id))) }, 'stk|xf|BTC|long|10|50000'));
+  assert.ok(findId(checkMessage(h.screen, '직접 입력 후'), 'stk|xf|BTC|long|10|50000'));
 });
 
 test('옵션 주문창: 행사가·만기·수량 → 손익분기점과 만기 시나리오 → 매수', async () => {
@@ -295,7 +319,7 @@ test('검색·출석·랭킹·도움말·공유', async () => {
   const many = await h.submit('stk|m_search', { q: '삼성' });
   assert.ok(many.rows[0].components[0].options.length > 1);
   await h.submit('stk|m_search', { q: 'AAPL' });
-  assert.match(toJSON(h.screen.embeds[0]).title, /애플/);
+  assert.match(fieldsText(h.screen), /애플/);
   await h.submit('stk|m_search', { q: '없는종목zzz' });
   await h.click('stk|daily');
   assert.match(h.notice(), /출석 보상/);
@@ -326,7 +350,7 @@ test('시세가 없는 상태(봇 막 켜짐)에서도 화면이 깨지지 않�
   await h.command();
   await h.pick('stk|cat', 'us');
   await h.click('stk|a|AAPL|1d');
-  assert.strictEqual(toJSON(h.screen.embeds[0]).image, undefined);
+  assert.ok(!checkMessage(h.screen, 'AAPL').images.some((u) => /charts\/AAPL_/.test(u)));
   await h.click('stk|tb|AAPL|cash|0|o');
   assert.match(fieldsText(h.screen), /시세 준비 중/);
   await h.click('stk|xb|AAPL|cash|1');
