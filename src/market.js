@@ -1,9 +1,8 @@
-// 시장 상태 — 실제 시세를 원화로 보관하고, 장 운영 여부와 차트 기록을 관리
+// 시장 상태 — 실제 시세를 원화로 보관하고 장 운영 여부를 판단 (차트는 GitHub Pages 이미지 사용)
 
 const { ASSETS, findAsset } = require('./assets');
 
-const HISTORY_LEN = 120;              // 차트용 기록 개수 (틱 단위)
-const STALE_MS = 15 * 60 * 1000;      // 이보다 오래된 시세는 '장 마감'으로 표시
+const STALE_MS = 45 * 60 * 1000;      // 이보다 오래된 시세는 '장 마감'으로 표시 (Pages 시세는 15분 주기)
 const CRYPTO_STALE_MS = 5 * 60 * 1000;
 
 function kstDayKey(now) {
@@ -11,7 +10,7 @@ function kstDayKey(now) {
 }
 
 function emptyQuote() {
-  return { price: null, prevClose: null, raw: null, updatedAt: 0, period: null, history: [] };
+  return { price: null, prevClose: null, raw: null, updatedAt: 0, period: null };
 }
 
 function createMarket(now = Date.now()) {
@@ -26,6 +25,7 @@ function syncMarket(market) {
   delete market.usdKrw;
   delete market.lastYahoo;
   for (const a of ASSETS) if (!market.assets[a.id]) market.assets[a.id] = emptyQuote();
+  for (const q of Object.values(market.assets)) delete q.history; // 예전 버전의 차트 기록은 더 이상 쓰지 않음
   for (const id of Object.keys(market.assets)) if (!findAsset(id)) delete market.assets[id];
   return market;
 }
@@ -56,16 +56,6 @@ function marketStatus(market, id, now = Date.now()) {
   return isOpen(market, id, now) ? '실시간' : '장 마감 (종가 기준)';
 }
 
-// 틱마다 차트 기록을 남긴다
-function recordHistory(market, now = Date.now()) {
-  for (const q of Object.values(market.assets)) {
-    if (q.price == null) continue;
-    q.history.push(q.price);
-    if (q.history.length > HISTORY_LEN) q.history.splice(0, q.history.length - HISTORY_LEN);
-  }
-  market.lastTick = now;
-}
-
 module.exports = {
-  createMarket, syncMarket, quote, price, isOpen, marketStatus, recordHistory, kstDayKey, HISTORY_LEN,
+  createMarket, syncMarket, quote, price, isOpen, marketStatus, kstDayKey,
 };

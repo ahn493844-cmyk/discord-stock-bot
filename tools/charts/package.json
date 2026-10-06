@@ -1,0 +1,13 @@
+{
+  "name": "stock-bot-charts",
+  "private": true,
+  "description": "GitHub Actions에서 시세·차트 이미지를 만들어 GitHub Pages에 올리는 도구 (Railway에서는 실행하지 않음)",
+  "scripts": {
+    "build": "node build.js",
+    "sample": "node build.js --sample"
+  },
+  "dependencies": {
+    "@expo-google-fonts/nanum-gothic": "^0.4.0",
+    "@napi-rs/canvas": "^1.0.10"
+  }
+}

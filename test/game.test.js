@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const game = require('../src/game');
-const { isOpen, recordHistory } = require('../src/market');
+const { isOpen } = require('../src/market');
 
 const NOW = Date.UTC(2026, 0, 5, 3); // 월요일 KST 12:00
 
@@ -218,13 +218,6 @@ test('v2 공용 계좌 + 가상 종목 데이터도 정산된다', () => {
     guilds: { g: { newsChannelId: null } },
   }, NOW);
   assert.strictEqual(s.users.a.cash, 3100);
-});
-
-test('차트 기록은 최대 120개', () => {
-  const s = fresh();
-  for (let i = 0; i < 200; i++) recordHistory(s.market, NOW + i);
-  assert.strictEqual(s.market.assets['005930'].history.length, 120);
-  assert.strictEqual(s.market.assets.TSLA.history.length, 0);
 });
 
 test('반대매매할 것이 없으면 매 틱 같은 알림을 반복하지 않는다', () => {
