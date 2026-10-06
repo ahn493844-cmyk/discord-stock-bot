@@ -3,12 +3,14 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, REST, Routes, MessageFlags } = require('discord.js');
 const store = require('./store');
-const { tick } = require('./market');
-const { definitions, handle, newsEmbed } = require('./commands');
+const { recordHistory } = require('./market');
+const { refreshPrices } = require('./prices');
+const { processRisk } = require('./game');
+const { definitions, handle, autocomplete } = require('./commands');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID; // 설정 시 해당 서버에만 즉시 명령어 등록 (테스트용)
-const TICK_SECONDS = Math.max(10, Number(process.env.TICK_SECONDS) || 60);
+const TICK_SECONDS = Math.max(15, Number(process.env.TICK_SECONDS) || 60);
 
 if (!TOKEN) {
   console.error('DISCORD_TOKEN 환경변수가 없습니다. .env.example을 참고해 .env 파일을 만들어 주세요.');
@@ -25,24 +27,44 @@ async function registerCommands(appId) {
   console.log(`[bot] 슬래시 명령어 ${definitions.length}개 등록 (${GUILD_ID ? `서버 ${GUILD_ID}` : '전역'})`);
 }
 
-async function broadcastNews(news) {
-  for (const [guildId, g] of Object.entries(state.guilds)) {
-    if (!g.newsChannelId || !client.guilds.cache.has(guildId)) continue;
+// 반대매매·강제청산·만기 정산 알림을 DM으로 보낸다 (DM을 막아둔 사람은 건너뜀)
+async function notify(events) {
+  const byUser = new Map();
+  for (const e of events) byUser.set(e.userId, [...(byUser.get(e.userId) || []), e.text]);
+  for (const [userId, lines] of byUser) {
     try {
-      const ch = await client.channels.fetch(g.newsChannelId);
-      if (ch && ch.isTextBased()) await ch.send({ embeds: news.map(newsEmbed) });
+      const user = await client.users.fetch(userId);
+      await user.send(`📢 **주식 게임 알림**\n${lines.join('\n')}`);
     } catch (err) {
-      console.warn(`[news] ${guildId} 뉴스 전송 실패:`, err.message);
+      console.warn(`[notify] ${userId} DM 실패:`, err.message);
     }
   }
 }
 
-function runTick() {
-  const news = tick(state.market);
-  store.scheduleSave(state);
-  if (news.length) {
-    console.log('[news]', news.map((n) => n.headline).join(' / '));
-    broadcastNews(news);
+let ticking = false;
+let lastSummaryLog = 0;
+async function runTick(force = false) {
+  if (ticking) return;
+  ticking = true;
+  try {
+    const now = Date.now();
+    const summary = await refreshPrices(state.market, { now, force });
+    if (force || summary.errors.length || now - lastSummaryLog > 30 * 60 * 1000) {
+      console.log(`[price] 시세 갱신 성공 ${summary.ok} · 실패 ${summary.fail}` +
+        (summary.errors.length ? ` · ${summary.errors.slice(0, 5).join(' | ')}` : ''));
+      lastSummaryLog = now;
+    }
+    recordHistory(state.market, now);
+    const events = processRisk(state, now);
+    store.scheduleSave(state);
+    if (events.length) {
+      console.log(`[risk] 알림 ${events.length}건`);
+      await notify(events);
+    }
+  } catch (err) {
+    console.error('[tick] 오류:', err);
+  } finally {
+    ticking = false;
   }
 }
 
@@ -54,13 +76,19 @@ client.once(Events.ClientReady, async (c) => {
   } catch (err) {
     console.error('[bot] 명령어 등록 실패:', err);
   }
-  setInterval(runTick, TICK_SECONDS * 1000);
+  await runTick(true);
+  setInterval(() => runTick(), TICK_SECONDS * 1000);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand() || !interaction.inGuild()) return;
+  if (!interaction.inGuild()) return;
+  if (interaction.isAutocomplete()) {
+    await autocomplete(interaction, { state }).catch((err) => console.warn('[autocomplete]', err.message));
+    return;
+  }
+  if (!interaction.isChatInputCommand()) return;
   try {
-    const changed = await handle(interaction, { state, tickSeconds: TICK_SECONDS });
+    const changed = await handle(interaction, { state });
     if (changed) store.scheduleSave(state);
   } catch (err) {
     console.error(`[bot] /${interaction.commandName} 처리 중 오류:`, err);
