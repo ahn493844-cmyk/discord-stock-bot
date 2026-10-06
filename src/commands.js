@@ -2,11 +2,12 @@
 
 const {
   SlashCommandBuilder, InteractionContextType, ApplicationIntegrationType, MessageFlags,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
 } = require('discord.js');
 const game = require('./game');
 const ui = require('./ui');
 const tickets = require('./tickets');
-const { render } = require('./v2');
+const { render, noticeContainer } = require('./v2');
 const { findAsset, searchAssets } = require('./assets');
 const { quote } = require('./market');
 
@@ -250,7 +251,22 @@ async function handleComponent(interaction, { state }) {
         embed = ui.rankingEmbed(state, args[1], gid, now);
       }
       embed.setFooter({ text: `${user.displayName ?? user.username}님이 공유 · /주식 으로 직접 해 보세요` });
-      await interaction.reply(render({ embeds: [embed], allowedMentions: { parse: [] } }));
+      // 공유한 사람만 지울 수 있는 삭제 버튼 (봇이 보낸 메시지라 본인이 직접 지울 수 없어서)
+      const del = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`stk|del|${user.id}`).setLabel('삭제').setEmoji('🗑️').setStyle(ButtonStyle.Secondary),
+      );
+      await interaction.reply(render({ embeds: [embed], components: [del], allowedMentions: { parse: [] } }));
+      break;
+    }
+    case 'del': {
+      if (args[0] !== user.id) {
+        const msg = render({ v2: [noticeContainer({ error: true, text: '⚠️ 공유한 사람만 지울 수 있어요.' })] });
+        await interaction.reply({ ...msg, flags: msg.flags | MessageFlags.Ephemeral });
+        break;
+      }
+      // 버튼이 달린 메시지를 상호작용 토큰으로 지운다 (봇 권한 없이도 가능)
+      await interaction.deferUpdate();
+      await interaction.deleteReply();
       break;
     }
     default:
