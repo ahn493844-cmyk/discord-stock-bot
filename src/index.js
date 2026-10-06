@@ -85,7 +85,8 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.inGuild()) return;
+  // 내 계정에 추가한 앱으로 쓰면 봇이 없는 서버에서도 온다 → 서버 ID만 있으면 처리
+  if (!interaction.guildId) return;
   const ctx = { state };
   try {
     if (interaction.isAutocomplete()) {
