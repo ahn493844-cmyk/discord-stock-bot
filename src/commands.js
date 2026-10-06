@@ -1,6 +1,8 @@
 // /주식 명령어와 GUI 상호작용(버튼·선택 메뉴·팝업) 처리
 
-const { SlashCommandBuilder, InteractionContextType, MessageFlags } = require('discord.js');
+const {
+  SlashCommandBuilder, InteractionContextType, ApplicationIntegrationType, MessageFlags,
+} = require('discord.js');
 const game = require('./game');
 const ui = require('./ui');
 const tickets = require('./tickets');
@@ -10,16 +12,23 @@ const { quote } = require('./market');
 
 const { won } = game;
 
+// 서버에 설치한 봇으로도, 각자 "내 계정에 앱 추가"로도 쓸 수 있게 한다.
+// (서버 설정에서 봇 명령어가 막혀 있어도 내 계정에 추가하면 그 서버에서 쓸 수 있다)
+const INSTALL_TYPES = [ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall];
+
 const definitions = [
   new SlashCommandBuilder().setName('주식').setDescription('주식 터미널을 엽니다 (버튼으로 시세·차트·주문·자산 관리)')
     .addStringOption((o) => o.setName('종목').setDescription('바로 열 종목 (선택)').setAutocomplete(true))
     .setContexts(InteractionContextType.Guild)
+    .setIntegrationTypes(INSTALL_TYPES)
     .toJSON(),
   new SlashCommandBuilder().setName('직업랜덤뽑기').setDescription('직업(매일 출석 보상)을 다시 뽑습니다 (하루 한 번, 확인 후 실행)')
     .setContexts(InteractionContextType.Guild)
+    .setIntegrationTypes(INSTALL_TYPES)
     .toJSON(),
   new SlashCommandBuilder().setName('환생').setDescription('모든 자산을 버리고 출신·직업을 다시 뽑습니다 (24시간에 한 번, 확인 후 실행)')
     .setContexts(InteractionContextType.Guild)
+    .setIntegrationTypes(INSTALL_TYPES)
     .toJSON(),
 ];
 

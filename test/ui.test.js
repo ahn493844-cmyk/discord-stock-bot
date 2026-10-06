@@ -507,3 +507,10 @@ test('/직업랜덤뽑기: 확인 화면 → 뽑기 → 결과, 같은 날 두 �
     game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
   }
 });
+
+test('명령어는 서버 설치와 내 계정 설치 둘 다 지원하고, 서버 안에서만 쓴다', () => {
+  for (const d of definitions) {
+    assert.deepStrictEqual(d.integration_types, [0, 1], d.name);
+    assert.deepStrictEqual(d.contexts, [0], d.name);
+  }
+});
