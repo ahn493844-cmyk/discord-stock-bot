@@ -15,6 +15,9 @@ const definitions = [
     .addStringOption((o) => o.setName('종목').setDescription('바로 열 종목 (선택)').setAutocomplete(true))
     .setContexts(InteractionContextType.Guild)
     .toJSON(),
+  new SlashCommandBuilder().setName('직업랜덤뽑기').setDescription('직업(매일 출석 보상)을 다시 뽑습니다 (하루 한 번, 확인 후 실행)')
+    .setContexts(InteractionContextType.Guild)
+    .toJSON(),
   new SlashCommandBuilder().setName('환생').setDescription('모든 자산을 버리고 출신·직업을 다시 뽑습니다 (24시간에 한 번, 확인 후 실행)')
     .setContexts(InteractionContextType.Guild)
     .toJSON(),
@@ -40,7 +43,9 @@ async function handleCommand(interaction, { state }) {
   const isNew = !state.users[interaction.user.id];
   const acc = game.getUser(state, interaction.user.id, interaction.guildId, now);
   let view;
-  if (interaction.commandName === '환생') {
+  if (interaction.commandName === '직업랜덤뽑기') {
+    view = isNew ? ui.homeView(state, interaction.user, now, ui.birthNotice(acc)) : ui.jobRollConfirmView(state, interaction.user, now);
+  } else if (interaction.commandName === '환생') {
     view = isNew ? ui.homeView(state, interaction.user, now, ui.birthNotice(acc)) : ui.rebirthConfirmView(state, interaction.user, now);
   } else {
     const target = interaction.options.getString('종목');
@@ -136,6 +141,20 @@ async function handleComponent(interaction, { state }) {
       });
       changed = r.changed;
       await show(ui.homeView(state, user, now, r.notice));
+      break;
+    }
+    case 'jr':
+      await show(ui.jobRollConfirmView(state, user, now));
+      break;
+    case 'jrok': {
+      try {
+        const r = game.rerollJob(state, user.id, gid, now);
+        changed = true;
+        await show(ui.jobRollResultView(state, user, r, now));
+      } catch (err) {
+        if (!(err instanceof game.GameError)) throw err;
+        await show(ui.jobRollConfirmView(state, user, now, { error: true, text: `⚠️ ${err.message}` }));
+      }
       break;
     }
     case 'rb':

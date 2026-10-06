@@ -153,8 +153,8 @@ function harness(state) {
   };
 }
 
-test('명령어는 /주식, /환생 두 개', () => {
-  assert.deepStrictEqual(definitions.map((d) => d.name), ['주식', '환생']);
+test('명령어는 /주식, /직업랜덤뽑기, /환생', () => {
+  assert.deepStrictEqual(definitions.map((d) => d.name), ['주식', '직업랜덤뽑기', '환생']);
 });
 
 test('홈 → 분류 → 페이지 이동 → 종목 → 차트 기간 전환', async () => {
@@ -440,7 +440,7 @@ test('처음 /주식: 운명 카드 → 출석은 직업 보상', async () => {
   assert.match(h.notice(), /운명이 정해졌어요/);
   assert.match(home.text, /동수저 · 💼 회사원/);
   await h.click('stk|daily');
-  assert.match(h.notice(), /회사원 출석 보상 \*\*100,000원\*\*/);
+  assert.match(h.notice(), /회사원 출석 보상 \*\*1,000,000원\*\*/);
   // 두 번째부터는 운명 카드 없음
   await h.command();
   assert.doesNotMatch(h.notice(), /운명이 정해졌어요/);
@@ -469,7 +469,7 @@ test('/환생: 경고·확인 화면 → 24시간 쿨다운 → 실행하면 새
     assert.ok(!c.rows.flatMap((r) => r.components).find((b) => b.custom_id === 'stk|rbok').disabled);
     const done = await h.click('stk|rbok');
     assert.match(done.text, /새로운 인생이 시작됐어요/);
-    assert.match(done.text, /금수저[\s\S]*150,000,000원[\s\S]*의사[\s\S]*400,000원/);
+    assert.match(done.text, /금수저[\s\S]*150,000,000원[\s\S]*의사[\s\S]*4,000,000원/);
     const u = game.getUser(state, 'u1');
     assert.strictEqual(u.cash, 150_000_000);
     assert.deepStrictEqual(u.holdings, {});
@@ -478,6 +478,31 @@ test('/환생: 경고·확인 화면 → 24시간 쿨다운 → 실행하면 새
     // 수익률은 새 시작 자금 기준
     const home = await h.click('stk|home');
     assert.match(home.text, /시작 자금 150,000,000원 대비/);
+  } finally {
+    game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
+  }
+});
+
+test('/직업랜덤뽑기: 확인 화면 → 뽑기 → 결과, 같은 날 두 번은 안 됨', async () => {
+  const state = makeState();
+  const h = harness(state);
+  await h.command();
+  let c = await h.command(null, '직업랜덤뽑기');
+  assert.match(c.text, /직업 다시 뽑기[\s\S]*지금 직업: 💼 \*\*회사원\*\*/);
+  assert.match(c.text, /아이돌 1%/);
+  game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }), () => 'jobless');
+  try {
+    const r = await h.click('stk|jrok');
+    assert.match(r.text, /새 직업: 🛋️ 백수/);
+    assert.match(r.text, /1,000,000원\*\* → \*\*100,000원/);
+    c = await h.click('stk|jr');
+    assert.ok(c.rows.flatMap((x) => x.components).find((b) => b.custom_id === 'stk|jrok').disabled);
+    await h.click('stk|jrok');
+    assert.match(h.notice(), /하루에 한 번/);
+    assert.strictEqual(game.getUser(state, 'u1').job, 'jobless');
+    // 결과 화면의 출석 버튼은 새 직업 보상
+    await h.click('stk|daily|jr');
+    assert.match(h.notice(), /백수 출석 보상 \*\*100,000원/);
   } finally {
     game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
   }

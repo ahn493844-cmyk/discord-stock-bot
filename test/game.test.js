@@ -171,7 +171,7 @@ test('출석은 하루 한 번', () => {
   game.claimDaily(s, 'u', 'g', NOW);
   assert.throws(() => game.claimDaily(s, 'u', 'g', NOW + 1000), game.GameError);
   game.claimDaily(s, 'u', 'g', NOW + 86400000);
-  assert.strictEqual(game.getUser(s, 'u').cash, game.START_CASH + 2 * 100_000);
+  assert.strictEqual(game.getUser(s, 'u').cash, game.START_CASH + 2 * 1_000_000);
 });
 
 test('파산은 순자산이 적을 때만 가능하고 모든 포지션을 초기화한다', () => {
@@ -246,8 +246,10 @@ test('출신·직업 확률표 합계는 100%, 뽑기는 확률대로 나온다'
     const o = life.originOf(r.origin);
     assert.ok(r.startCash >= o.min && r.startCash <= o.max && r.startCash % 100000 === 0);
   }
-  assert.ok(Math.abs(count.dirt / 20000 - 0.35) < 0.02, JSON.stringify(count));
-  assert.ok(count.chaebol > 100 && count.chaebol < 320, JSON.stringify(count));
+  assert.ok(Math.abs(count.dirt / 20000 - 0.40) < 0.02, JSON.stringify(count));
+  assert.ok(Math.abs(count.orphan / 20000 - 0.09) < 0.01, JSON.stringify(count));
+  assert.ok(count.gold > 120 && count.gold < 280, JSON.stringify(count));
+  assert.ok((count.chaebol || 0) < 15, JSON.stringify(count));
 });
 
 test('기존 계좌는 자산 그대로 1세대 투자자가 되고 바로 환생할 수 있다', () => {
@@ -271,5 +273,23 @@ test('파산은 출신·직업을 유지하고 원래 시작 자금으로', () =
   const n = game.getUser(s, 'u');
   assert.strictEqual(n.cash, 50_000_000);
   assert.strictEqual(n.origin, 'silver');
-  assert.strictEqual(game.claimDaily(s, 'u', 'g', NOW + 86400e3).bonus, 200_000);
+  assert.strictEqual(game.claimDaily(s, 'u', 'g', NOW + 86400e3).bonus, 1_500_000);
+});
+
+test('직업 다시 뽑기는 하루 한 번, 자산·출신은 그대로', () => {
+  const s = fresh();
+  const u = game.getUser(s, 'u', 'g');
+  u.cash = 1234;
+  game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }), () => 'idol');
+  try {
+    const r = game.rerollJob(s, 'u', 'g', NOW);
+    assert.strictEqual(r.before.key, 'office');
+    assert.strictEqual(r.after.key, 'idol');
+    assert.strictEqual(u.cash, 1234);
+    assert.throws(() => game.rerollJob(s, 'u', 'g', NOW + 3600e3), /하루에 한 번/);
+    assert.ok(game.jobRollStatus(u, NOW + 86400e3).ready);
+    assert.strictEqual(game.claimDaily(s, 'u', 'g', NOW).bonus, 10_000_000);
+  } finally {
+    game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
+  }
 });

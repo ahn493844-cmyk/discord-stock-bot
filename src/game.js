@@ -39,8 +39,10 @@ function createState(now = Date.now()) {
 
 // 출신·직업 뽑기 (테스트에서 고정값으로 바꿀 수 있게 분리)
 let rollLife = () => life.rollLife(Math.random);
-function setLifeRoller(fn) {
+let rollJob = () => life.rollJob(Math.random);
+function setLifeRoller(fn, jobFn) {
   rollLife = fn;
+  rollJob = jobFn || (() => fn().job);
 }
 
 // 새 계좌: 출신·직업을 뽑아 시작 자금을 정한다. extra로 일부를 지정할 수 있다
@@ -65,7 +67,7 @@ function ensureAccountFields(u) {
   if (!u.origin) {
     u.origin = life.LEGACY_ORIGIN.key;
     u.startCash = u.startCash || START_CASH;
-    u.job = u.job || rollLife().job;
+    u.job = u.job || rollJob();
     u.lastRebirthAt = null;
     u.rebirths = u.rebirths || 0;
   }
@@ -635,6 +637,23 @@ function bankrupt(state, userId, guildId, now = Date.now()) {
   return { cash: keep.startCash, bankruptcies };
 }
 
+// ── 직업 다시 뽑기 (하루 한 번) ──────────────────────────────
+
+function jobRollStatus(user, now = Date.now()) {
+  return { ready: user.lastJobRoll !== kstDayKey(now) };
+}
+
+function rerollJob(state, userId, guildId, now = Date.now()) {
+  const user = getUser(state, userId, guildId, now);
+  if (!jobRollStatus(user, now).ready) {
+    throw new GameError('직업은 하루에 한 번만 다시 뽑을 수 있어요. 내일(자정 KST) 다시 와 주세요!');
+  }
+  const before = user.job;
+  user.job = rollJob();
+  user.lastJobRoll = kstDayKey(now);
+  return { before: life.jobOf(before), after: life.jobOf(user.job) };
+}
+
 // ── 환생 ─────────────────────────────────────────────────────
 
 function rebirthStatus(user, now = Date.now()) {
@@ -674,5 +693,5 @@ module.exports = {
   parseQuantity, parseAmount, parseStrike, parseWon, buy, sell, repay, openFuture, closeFuture,
   quoteOption, buyOption, sellOption, processRisk, claimDaily, bankrupt, ranking, won, fmtQty,
   buyLimits, simulate, maxFuturesMargin, maxOptionQty, roundQty, fee,
-  newAccount, startCashOf, setLifeRoller, rebirth, rebirthStatus,
+  newAccount, startCashOf, setLifeRoller, rebirth, rebirthStatus, rerollJob, jobRollStatus,
 };

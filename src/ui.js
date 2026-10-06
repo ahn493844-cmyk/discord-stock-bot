@@ -149,7 +149,7 @@ function rebirthConfirmView(state, user, now, notice) {
     acc.options.length ? `옵션 ${acc.options.length}건` : null,
     acc.loans.length ? `대출 ${won(v.loans)}` : null,
   ].filter(Boolean).join(' · ');
-  const odds = life.ORIGINS.map((o) => `${o.emoji} ${o.name} ${o.weight}% · ${shortWon(o.min)}~${shortWon(o.max)}`).join('\n');
+  const odds = life.ORIGINS.map((o) => `${o.emoji} ${o.name} ${o.weight}% · ${o.min === o.max ? shortWon(o.min) : `${shortWon(o.min)}~${shortWon(o.max)}`}`).join('\n');
   return {
     v2: [
       v2.noticeContainer(notice),
@@ -158,7 +158,7 @@ function rebirthConfirmView(state, user, now, notice) {
         v2.sep(),
         v2.text(`### 사라지는 것\n${identity(acc)}\n순자산 **${won(v.total)}**\n-# ${lose}`),
         v2.sep(),
-        v2.text(`### 새로 뽑을 확률\n-# ${odds.replace(/\n/g, '\n-# ')}\n-# 직업은 백수(출석 1만원)부터 톱스타(출석 100만원)까지`),
+        v2.text(`### 새로 뽑을 확률\n-# ${odds.replace(/\n/g, '\n-# ')}\n-# 직업은 백수(출석 ${shortWon(life.JOBS[0].pay)})부터 ${life.JOBS[life.JOBS.length - 1].name}(출석 ${shortWon(life.JOBS[life.JOBS.length - 1].pay)})까지`),
         v2.sep(),
         st.ready
           ? v2.text('-# 환생하면 24시간 동안 다시 환생할 수 없어요. 오늘 출석 보상은 이미 받았다면 새 인생에서도 내일부터 받을 수 있어요.')
@@ -166,6 +166,51 @@ function rebirthConfirmView(state, user, now, notice) {
         row(
           btn(id('rbok'), '모두 버리고 환생하기', ButtonStyle.Danger, { emoji: '💀', disabled: !st.ready }),
           btn(id('home'), '취소', ButtonStyle.Secondary),
+        ),
+      ]),
+    ],
+  };
+}
+
+// 직업 다시 뽑기 확인 화면
+function jobRollConfirmView(state, user, now, notice) {
+  const acc = game.getUser(state, user.id, null, now);
+  const cur = life.jobOf(acc.job);
+  const ready = game.jobRollStatus(acc, now).ready;
+  const odds = life.JOBS.map((j) => `${j.emoji} ${j.name} ${j.weight}% · 출석 ${shortWon(j.pay)}`).join('\n-# ');
+  return {
+    v2: [
+      v2.noticeContainer(notice),
+      v2.container(COLOR_INFO, [
+        v2.text(`## 🎲 직업 다시 뽑기\n지금 직업: ${cur.emoji} **${cur.name}** · 매일 출석 **${won(cur.pay)}**\n` +
+          '새로 뽑으면 **지금 직업은 사라져요.** 더 좋아질 수도, 나빠질 수도 있어요.'),
+        v2.sep(),
+        v2.text(`### 직업 확률\n-# ${odds}`),
+        v2.sep(),
+        ready
+          ? v2.text('-# 하루에 한 번 뽑을 수 있어요 (자정 KST 초기화). 자산과 출신은 그대로예요.')
+          : v2.text('⏳ 오늘은 이미 뽑았어요. 내일(자정 KST) 다시 뽑을 수 있어요.'),
+        row(
+          btn(id('jrok'), '직업 뽑기', ButtonStyle.Danger, { emoji: '🎲', disabled: !ready }),
+          btn(id('home'), '취소', ButtonStyle.Secondary),
+        ),
+      ]),
+    ],
+  };
+}
+
+function jobRollResultView(state, user, r, now) {
+  const up = r.after.pay - r.before.pay;
+  return {
+    v2: [
+      v2.container(up > 0 ? COLOR_OK : up < 0 ? COLOR_ERR : COLOR_INFO, [
+        v2.text(`## 🎲 새 직업: ${r.after.emoji} ${r.after.name}!\n` +
+          `${r.before.emoji} ${r.before.name} → ${r.after.emoji} **${r.after.name}** (확률 ${r.after.weight}%)\n` +
+          `매일 출석 **${won(r.before.pay)}** → **${won(r.after.pay)}** ${up > 0 ? '🎉' : up < 0 ? '😢' : ''}`),
+        v2.text('-# 내일(자정 KST) 다시 뽑을 수 있어요.'),
+        row(
+          btn(id('daily', 'jr'), `출석 +${won(r.after.pay)}`, ButtonStyle.Success, { emoji: '🎁' }),
+          btn(id('home'), '홈', ButtonStyle.Secondary, { emoji: '🏠' }),
         ),
       ]),
     ],
@@ -468,10 +513,16 @@ function portfolioView(state, target, now, notice, viewerId = target.id) {
       btn(id('rank', 'all'), '랭킹', ButtonStyle.Secondary, { emoji: '🏆' }),
       homeBtn(),
       btn(id('share', 'pf'), '채널에 공유', ButtonStyle.Success, { emoji: '📢' }),
-      btn(id('rb', 'pf'), '환생', ButtonStyle.Secondary, { emoji: '🌱' }),
     ]
     : [btn(id('rank', 'all'), '랭킹으로', ButtonStyle.Secondary, { emoji: '⬅️' }), homeBtn()];
-  if (mine && v.total < game.BANKRUPT_LIMIT) buttons.push(btn(id('bankrupt'), '파산 신청', ButtonStyle.Danger, { emoji: '💀' }));
+  // 인생 관련 버튼은 둘째 줄 (한 줄에 버튼 최대 5개)
+  const lifeButtons = mine
+    ? [
+      btn(id('jr', 'pf'), '직업 뽑기', ButtonStyle.Secondary, { emoji: '🎲' }),
+      btn(id('rb', 'pf'), '환생', ButtonStyle.Secondary, { emoji: '🌱' }),
+    ]
+    : [];
+  if (mine && v.total < game.BANKRUPT_LIMIT) lifeButtons.push(btn(id('bankrupt'), '파산 신청', ButtonStyle.Danger, { emoji: '💀' }));
 
   return {
     v2: [
@@ -488,6 +539,7 @@ function portfolioView(state, target, now, notice, viewerId = target.id) {
           .setPlaceholder(`나머지 ${rest.length}종목 보기`)
           .addOptions(rest.map(({ hid, a, h }) => ({ label: clipLabel(a ? a.name : hid), value: hid, description: fmtQty(a, h.qty) })))) : null,
         row(...buttons),
+        lifeButtons.length ? row(...lifeButtons) : null,
       ]),
     ],
     allowedMentions: { parse: [] },
@@ -652,6 +704,7 @@ function helpView() {
         v2.section(`**⚡ 선물 (롱/숏)**\n-# 롱=상승, 숏=하락 베팅 · 최대 ${game.MAX_LEVERAGE}배 · 손실이 증거금 ${game.LIQUIDATION_LOSS * 100}%에 닿으면 강제청산`, { button: go(id('pos', 'fut'), '포지션', '📋') }),
         v2.section('**🎯 옵션 (콜/풋)**\n-# 콜=오를수록, 풋=내릴수록 이익 · 손실은 산 가격까지만 · 만기(1시간/1일/1주)에 자동 정산', { button: go(id('pos', 'opt'), '포지션', '🎯') }),
         v2.section('**🏆 랭킹 · 🎁 출석**\n-# 순자산 순위 · 출석 보상은 직업마다 달라요 (하루 한 번)', { button: go(id('rank', 'all'), '랭킹', '🏆') }),
+        v2.section('**🎲 직업 다시 뽑기**\n-# 하루 한 번, 직업(출석 보상)만 다시 뽑아요 (`/직업랜덤뽑기`)', { button: go(id('jr', 'help'), '직업 뽑기', '🎲') }),
         v2.section('**🌱 환생**\n-# 24시간에 한 번, 모든 자산을 버리고 출신·직업을 다시 뽑아요 (`/환생`)', { button: go(id('rb', 'help'), '환생', '🌱') }),
         v2.text('-# 🔔 반대매매·강제청산·옵션 만기는 DM으로 알려 드려요 (서버 DM 허용 필요)'),
         row(homeBtn()),
@@ -705,5 +758,5 @@ function searchResultView(state, query, hits, now) {
 module.exports = {
   id, homeView, listView, assetView, assetEmbed, portfolioView, portfolioEmbed, positionsView, rankingView, rankingEmbed,
   helpView, searchModal, repayModal, searchResultView, chartUrl, RANGES,
-  rebirthConfirmView, rebirthResultView, birthNotice, identity,
+  rebirthConfirmView, rebirthResultView, birthNotice, identity, jobRollConfirmView, jobRollResultView,
 };
