@@ -49,7 +49,9 @@ const definitions = [
     .addStringOption((o) => o.setName('수량').setDescription('숫자, 전부, 절반, 50% 등').setRequired(true)),
   new SlashCommandBuilder().setName('내정보').setDescription('내 자산과 보유 주식을 봅니다')
     .addUserOption((o) => o.setName('유저').setDescription('다른 사람의 정보를 볼 수도 있어요')),
-  new SlashCommandBuilder().setName('랭킹').setDescription('이 서버의 자산 순위를 봅니다'),
+  new SlashCommandBuilder().setName('랭킹').setDescription('총자산 순위를 봅니다')
+    .addStringOption((o) => o.setName('범위').setDescription('기본: 전체 서버')
+      .addChoices({ name: '전체 서버', value: 'all' }, { name: '이 서버', value: 'guild' })),
   new SlashCommandBuilder().setName('출석').setDescription(`하루 한 번 ${won(game.DAILY_BONUS)}을 받습니다`),
   new SlashCommandBuilder().setName('파산신청')
     .setDescription(`총자산이 ${won(game.BANKRUPT_LIMIT)} 미만이면 초기 자금으로 다시 시작합니다`),
@@ -95,7 +97,7 @@ function chartEmbed(state, symbol) {
 }
 
 function profileEmbed(state, guildId, user) {
-  const acc = game.getUser(state, guildId, user.id);
+  const acc = game.getUser(state, user.id, guildId);
   const v = game.portfolioValue(state, acc);
   const totalProfit = v.total - game.START_CASH;
   const holdings = Object.entries(acc.holdings).map(([sym, h]) => {
@@ -124,7 +126,7 @@ function rankingEmbed(state, guildId) {
   const rows = game.ranking(state, guildId, 10).map((r, i) =>
     `${medals[i] || `**${i + 1}.**`} <@${r.userId}> — ${won(r.total)} (${fmtPct(pct(game.START_CASH, r.total))})`);
   return new EmbedBuilder()
-    .setTitle('🏆 자산 랭킹')
+    .setTitle(guildId ? '🏆 이 서버 자산 랭킹' : '🏆 전체 서버 자산 랭킹')
     .setColor(COLOR_INFO)
     .setDescription(rows.length ? rows.join('\n') : '아직 참가자가 없어요. `/매수`나 `/출석`으로 참가해 보세요!');
 }
@@ -135,13 +137,14 @@ function helpEmbed() {
     .setColor(COLOR_INFO)
     .setDescription(
       `처음 명령어를 쓰면 **${won(game.START_CASH)}**으로 계좌가 자동 개설됩니다.\n` +
+      '계좌는 봇이 있는 **모든 서버에서 공용**입니다. 어느 서버에서 거래해도 같은 계좌예요.\n' +
       '가상의 종목들의 가격이 주기적으로 변하고, 가끔 뉴스가 터져 크게 움직입니다.\n​')
     .addFields(
       { name: '/시세', value: '전체 종목 현재가와 변동률' },
       { name: '/차트 종목', value: '최근 가격 흐름 미니 차트' },
       { name: '/매수 종목 수량 · /매도 종목 수량', value: '수량은 `10`, `전부`, `절반`, `30%` 처럼 입력' },
       { name: '/내정보 [유저]', value: '현금, 보유 주식, 수익률' },
-      { name: '/랭킹', value: '서버 내 총자산 순위' },
+      { name: '/랭킹 [범위]', value: '전체 서버 또는 이 서버의 총자산 순위' },
       { name: '/출석', value: `하루 한 번 ${won(game.DAILY_BONUS)} 지급 (KST 자정 초기화)` },
       { name: '/파산신청', value: `총자산 ${won(game.BANKRUPT_LIMIT)} 미만일 때 초기 자금으로 재시작` },
       { name: '/뉴스채널 [채널]', value: '시장 뉴스 알림 채널 설정 (서버 관리 권한 필요)' },
@@ -196,12 +199,12 @@ async function handle(interaction, ctx) {
         await interaction.reply({ embeds: [chartEmbed(state, opt.getString('종목', true))] });
         return false;
       case '매수': {
-        const r = game.buy(state, gid, uid, opt.getString('종목', true), opt.getString('수량', true));
+        const r = game.buy(state, uid, gid, opt.getString('종목', true), opt.getString('수량', true));
         await interaction.reply({ embeds: [tradeEmbed('buy', r)] });
         return true;
       }
       case '매도': {
-        const r = game.sell(state, gid, uid, opt.getString('종목', true), opt.getString('수량', true));
+        const r = game.sell(state, uid, gid, opt.getString('종목', true), opt.getString('수량', true));
         await interaction.reply({ embeds: [tradeEmbed('sell', r)] });
         return true;
       }
@@ -212,15 +215,18 @@ async function handle(interaction, ctx) {
         return true;
       }
       case '랭킹':
-        await interaction.reply({ embeds: [rankingEmbed(state, gid)], allowedMentions: { parse: [] } });
+        await interaction.reply({
+          embeds: [rankingEmbed(state, opt.getString('범위') === 'guild' ? gid : null)],
+          allowedMentions: { parse: [] },
+        });
         return false;
       case '출석': {
-        const r = game.claimDaily(state, gid, uid);
+        const r = game.claimDaily(state, uid, gid);
         await interaction.reply(`✅ 출석 완료! **${won(r.bonus)}**을 받았습니다. 현재 현금: ${won(r.cash)}`);
         return true;
       }
       case '파산신청': {
-        const r = game.bankrupt(state, gid, uid);
+        const r = game.bankrupt(state, uid, gid);
         await interaction.reply(`💀 파산 처리되었습니다. (${r.bankruptcies}번째) **${won(r.cash)}**으로 다시 시작합니다.`);
         return true;
       }
