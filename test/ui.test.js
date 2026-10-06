@@ -158,54 +158,133 @@ test('모든 종목 화면이 제한을 지킨다', async () => {
   for (const a of ASSETS) await h.click(`stk|a|${a.id}|1d`);
 });
 
-test('매수(현금·신용·미수) → 매도 → 자산 화면', async () => {
+// 화면의 모든 필드 텍스트를 한 줄로
+const fieldsText = (screen) => screen.embeds.map(toJSON).map((e) => [e.title, e.description, ...(e.fields || []).map((f) => `${f.name}=${f.value}`)].join(' ')).join(' ');
+const findId = (r, prefix) => [...r.ids].find((x) => x.startsWith(prefix));
+
+test('매수 주문창: 버튼으로 수량을 고르면 미리보기만 바뀌고, 실행해야 체결된다', async () => {
   const state = makeState();
   const h = harness(state);
   await h.command('005930');
-  const m = await h.click('stk|buy|005930');
-  assert.strictEqual(m.custom_id, 'stk|m_buy|005930');
-  await h.submit('stk|m_buy|005930', { qty: '5' }, { mode: 'cash' });
-  assert.match(h.notice(), /현금 매수 체결/);
-  await h.submit('stk|m_buy|005930', { qty: '3' }, { mode: 'credit' });
-  assert.match(h.notice(), /신용 대출/);
-  await h.submit('stk|m_buy|BTC', { qty: '5만원' }, { mode: 'misu' });
-  assert.match(h.notice(), /미수/);
-  await h.submit('stk|m_buy|005930', { qty: 'abc' }, { mode: 'cash' });
-  assert.match(h.notice(), /⚠️/);
-  await h.click('stk|sell|005930');
-  await h.submit('stk|m_sell|005930', { qty: '전부' });
-  assert.match(h.notice(), /매도 체결/);
-  const pf = await h.click('stk|pf');
-  assert.ok(pf.embeds[0].fields.some((f) => f.name.startsWith('보유 현물')));
-  await h.pick('stk|pick|pf', 'BTC');
+  let t = await h.click('stk|tb|005930|cash|0|o');
+  assert.match(fieldsText(h.screen), /수량을 정해 주세요/);
+  assert.ok(toJSON(t.rows[3].components[0]).disabled, '수량 0이면 실행 버튼 비활성');
+  t = await h.click(findId(t, 'stk|tb|005930|cash|10|pb'));
+  const preview = fieldsText(h.screen);
+  assert.match(preview, /10주 × 70,000원/);
+  assert.match(preview, /내 돈 지출/);
+  assert.match(preview, /거래 후 모습/);
+  assert.strictEqual(game.getUser(state, 'u1').cash, game.START_CASH, '미리보기는 계좌를 바꾸지 않는다');
+  // 신용으로 바꾸면 대출이 보인다
+  await h.pick('stk|tbm|005930|10', 'credit');
+  assert.match(fieldsText(h.screen), /대출[\s\S]*350,000원/);
+  // 최대 → 실행
+  t = await h.pick('stk|tbm|005930|10', 'cash');
+  t = await h.click(findId(t, 'stk|tb|005930|cash|') && [...t.ids].find((x) => x.endsWith('|r3')));
+  const exec = findId(t, 'stk|xb|005930|cash|');
+  const maxQty = Number(exec.split('|')[4]);
+  assert.strictEqual(maxQty, 14);
+  const r = await h.click(exec);
+  assert.match(fieldsText(h.screen), /매수 체결[\s\S]*현금[\s\S]*→/);
+  assert.strictEqual(game.getUser(state, 'u1').holdings['005930'].qty, 14);
+  assert.ok(findId(r, 'stk|tb|005930|cash|0|n'), '한 번 더 주문 버튼');
 });
 
-test('선물·옵션 → 포지션에서 선택·확인으로 정리 → 대출 상환', async () => {
+test('직접 입력: 금액·비율 입력이 주문창 미리보기로 들어간다 (체결 X)', async () => {
   const state = makeState();
   const h = harness(state);
-  await h.command('BTC');
-  await h.click('stk|fut|BTC|short');
-  await h.submit('stk|m_fut|BTC|short', { margin: '10만' }, { lev: '10' });
-  assert.match(h.notice(), /숏 10배 진입/);
-  await h.click('stk|opt|005930');
-  await h.submit('stk|m_opt|005930', { qty: '10', strike: '+5%' }, { kind: 'call', expiry: '1w' });
-  assert.match(h.notice(), /옵션 매수/);
-  await h.submit('stk|m_buy|005930', { qty: '5' }, { mode: 'credit' });
+  await h.click('stk|tb|BTC|cash|0|o');
+  const m = await h.click('stk|qi|b|BTC|cash');
+  assert.strictEqual(m.custom_id, 'stk|mq|b|BTC|cash');
+  const t = await h.submit('stk|mq|b|BTC|cash', { v: '10만원' });
+  assert.ok(findId(t, 'stk|xb|BTC|cash|0.001'));
+  assert.strictEqual(game.getUser(state, 'u1').holdings.BTC, undefined);
+  await h.submit('stk|mq|b|BTC|cash', { v: '이상한값' });
+  assert.match(h.notice(), /⚠️/);
+});
 
-  const pos = await h.click('stk|pos');
-  const select = pos.rows[0].components[0];
-  assert.strictEqual(select.options.length, 2);
-  const confirm = await h.pick('stk|close', select.options[0].value);
-  assert.ok([...confirm.ids].some((x) => x.startsWith('stk|closeok|')));
-  await h.click(`stk|closeok|${select.options[0].value}`);
-  assert.match(h.notice(), /청산/);
-  await h.click(`stk|closeok|${select.options[1].value}`);
-  assert.match(h.notice(), /옵션 .* 매도/);
-  await h.click('stk|repay');
-  await h.submit('stk|m_repay', { amount: '전부' });
-  assert.match(h.notice(), /상환/);
+test('매도 주문창: 실현 손익과 대출 자동 상환을 미리 보여 준다', async () => {
+  const state = makeState();
+  const h = harness(state);
+  game.buy(state, 'u1', 'g1', '005930', '10', 'credit');
+  state.market.assets['005930'].price = 77000;
+  let t = await h.click('stk|ts|005930|0|o');
+  t = await h.click([...t.ids].find((x) => x.startsWith('stk|ts|005930|5|')));
+  const p = fieldsText(h.screen);
+  assert.match(p, /실현 이익[\s\S]*\+35,000원|\+34,/);
+  assert.match(p, /대출 자동 상환/);
+  await h.click('stk|xs|005930|5');
+  assert.strictEqual(game.getUser(state, 'u1').holdings['005930'].qty, 5);
+  // 보유 없는 종목
+  const none = await h.click('stk|ts|AAPL|0|o');
+  assert.ok(toJSON(none.rows[2].components[0]).disabled);
+});
+
+test('선물 주문창: 레버리지·방향·증거금 → 청산가와 손익 시나리오 → 진입', async () => {
+  const state = makeState();
+  const h = harness(state);
+  let t = await h.click('stk|tf|BTC|long|5|0|o');
+  t = await h.pick('stk|tfl|BTC|long|0', '10');
+  t = await h.click(findId(t, 'stk|tf|BTC|long|10|100000|pb'));
+  let p = fieldsText(h.screen);
+  assert.match(p, /포지션 규모[\s\S]*1,000,000원/);
+  assert.match(p, /강제청산 가격[\s\S]*91,000,000원/);
+  assert.match(p, /\+1\.00% → \+10,000원/);
+  t = await h.click('stk|tf|BTC|short|10|100000|S');
+  p = fieldsText(h.screen);
+  assert.match(p, /\+1\.00% → -10,000원/);
+  await h.click('stk|xf|BTC|short|10|100000');
+  assert.match(fieldsText(h.screen), /선물 진입/);
+  assert.strictEqual(game.getUser(state, 'u1').futures.length, 1);
+  await h.click('stk|qi|f|BTC|long|10');
+  await h.submit('stk|mq|f|BTC|long|10', { v: '5만' });
+  assert.ok(findId({ ids: new Set(h.screen.components.map(toJSON).flatMap((r) => r.components.map((c) => c.custom_id))) }, 'stk|xf|BTC|long|10|50000'));
+});
+
+test('옵션 주문창: 행사가·만기·수량 → 손익분기점과 만기 시나리오 → 매수', async () => {
+  const state = makeState();
+  const h = harness(state);
+  let t = await h.click('stk|to|005930|call|1d|0|0|o');
+  t = await h.click('stk|to|005930|call|1d|5|0|U');
+  assert.match(fieldsText(h.screen), /행사가[\s\S]*73,500원/);
+  t = await h.pick('stk|toe|005930|call|5|0', '1w');
+  t = await h.click(findId(t, 'stk|to|005930|call|1w|5|10|pb'));
+  const p = fieldsText(h.screen);
+  assert.match(p, /최대 손실/);
+  assert.match(p, /손익분기점/);
+  assert.match(p, /만기 때 가격별 손익/);
+  t = await h.click('stk|to|005930|put|1w|5|10|P');
+  await h.click('stk|xo|005930|put|1w|5|10');
+  assert.match(fieldsText(h.screen), /옵션 매수/);
   const u = game.getUser(state, 'u1');
-  assert.strictEqual(u.futures.length + u.options.length + u.loans.length, 0);
+  assert.strictEqual(u.options[0].kind, 'put');
+  assert.strictEqual(u.options[0].strike, 73500);
+});
+
+test('실행 직전에 조건이 바뀌면 체결하지 않고 이유를 보여 준다', async () => {
+  const state = makeState();
+  const h = harness(state);
+  game.getUser(state, 'u1').cash = 1000;
+  await h.click('stk|xb|005930|cash|10');
+  assert.match(h.notice(), /체결되지 않았어요/);
+  assert.strictEqual(game.getUser(state, 'u1').holdings['005930'], undefined);
+});
+
+test('모든 종목의 모든 주문창이 디스코드 제한을 지킨다', async () => {
+  const state = makeState();
+  const h = harness(state);
+  game.getUser(state, 'u1', 'g1');
+  for (const a of ASSETS) {
+    await h.click(`stk|tb|${a.id}|misu|0|o`);
+    await h.click(`stk|tb|${a.id}|cash|${a.decimals ? '0.5' : '3'}|x`);
+    await h.click(`stk|tf|${a.id}|short|50|200000|x`);
+    await h.click(`stk|to|${a.id}|put|1h|-50|1|x`);
+    await h.click(`stk|ts|${a.id}|0|o`);
+    await h.click(`stk|qi|b|${a.id}|cash`);
+    await h.click(`stk|qi|o|${a.id}|call|1d|0`);
+  }
+  await h.click('stk|tb|없는종목|cash|0|o');
+  assert.match(h.notice(), /찾을 수 없어요/);
 });
 
 test('검색·출석·랭킹·도움말·공유', async () => {
@@ -248,7 +327,31 @@ test('시세가 없는 상태(봇 막 켜짐)에서도 화면이 깨지지 않�
   await h.pick('stk|cat', 'us');
   await h.click('stk|a|AAPL|1d');
   assert.strictEqual(toJSON(h.screen.embeds[0]).image, undefined);
-  await h.click('stk|buy|AAPL');
-  await h.submit('stk|m_buy|AAPL', { qty: '1' }, { mode: 'cash' });
+  await h.click('stk|tb|AAPL|cash|0|o');
+  assert.match(fieldsText(h.screen), /시세 준비 중/);
+  await h.click('stk|xb|AAPL|cash|1');
   assert.match(h.notice(), /시세/);
+});
+
+test('선물·옵션 → 포지션에서 선택·확인으로 정리 → 대출 상환', async () => {
+  const state = makeState();
+  const h = harness(state);
+  await h.command('BTC');
+  await h.click('stk|xf|BTC|short|10|100000');
+  await h.click('stk|xo|005930|call|1w|5|10');
+  await h.click('stk|xb|005930|credit|5');
+  const pos = await h.click('stk|pos');
+  const select = pos.rows[0].components[0];
+  assert.strictEqual(select.options.length, 2);
+  const confirm = await h.pick('stk|close', select.options[0].value);
+  assert.ok([...confirm.ids].some((x) => x.startsWith('stk|closeok|')));
+  await h.click(`stk|closeok|${select.options[0].value}`);
+  assert.match(h.notice(), /청산/);
+  await h.click(`stk|closeok|${select.options[1].value}`);
+  assert.match(h.notice(), /옵션 .* 매도/);
+  await h.click('stk|repay');
+  await h.submit('stk|m_repay', { amount: '전부' });
+  assert.match(h.notice(), /상환/);
+  const u = game.getUser(state, 'u1');
+  assert.strictEqual(u.futures.length + u.options.length + u.loans.length, 0);
 });
