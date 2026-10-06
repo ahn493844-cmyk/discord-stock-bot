@@ -3,10 +3,9 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Events, REST, Routes, MessageFlags } = require('discord.js');
 const store = require('./store');
-const { recordHistory } = require('./market');
 const { refreshPrices } = require('./prices');
 const { processRisk } = require('./game');
-const { definitions, handle, autocomplete } = require('./commands');
+const { definitions, handleCommand, handleComponent, handleModal, autocomplete } = require('./commands');
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID; // 설정 시 해당 서버에만 즉시 명령어 등록 (테스트용)
@@ -41,8 +40,11 @@ async function notify(events) {
   }
 }
 
+const PRICE_SAVE_MS = 10 * 60 * 1000; // 시세만 바뀐 경우 디스크 저장은 10분에 한 번
+
 let ticking = false;
 let lastSummaryLog = 0;
+let lastPriceSave = 0;
 async function runTick(force = false) {
   if (ticking) return;
   ticking = true;
@@ -50,13 +52,15 @@ async function runTick(force = false) {
     const now = Date.now();
     const summary = await refreshPrices(state.market, { now, force });
     if (force || summary.errors.length || now - lastSummaryLog > 30 * 60 * 1000) {
-      console.log(`[price] 시세 갱신 성공 ${summary.ok} · 실패 ${summary.fail}` +
+      console.log(`[price] 시세 갱신(${summary.source || '코인만'}) 성공 ${summary.ok} · 실패 ${summary.fail}` +
         (summary.errors.length ? ` · ${summary.errors.slice(0, 5).join(' | ')}` : ''));
       lastSummaryLog = now;
     }
-    recordHistory(state.market, now);
     const events = processRisk(state, now);
-    store.scheduleSave(state);
+    if (events.length || now - lastPriceSave > PRICE_SAVE_MS) {
+      store.scheduleSave(state);
+      lastPriceSave = now;
+    }
     if (events.length) {
       console.log(`[risk] 알림 ${events.length}건`);
       await notify(events);
@@ -82,16 +86,20 @@ client.once(Events.ClientReady, async (c) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.inGuild()) return;
-  if (interaction.isAutocomplete()) {
-    await autocomplete(interaction, { state }).catch((err) => console.warn('[autocomplete]', err.message));
-    return;
-  }
-  if (!interaction.isChatInputCommand()) return;
+  const ctx = { state };
   try {
-    const changed = await handle(interaction, { state });
+    if (interaction.isAutocomplete()) {
+      await autocomplete(interaction, ctx);
+      return;
+    }
+    let changed = false;
+    if (interaction.isChatInputCommand()) changed = await handleCommand(interaction, ctx);
+    else if (interaction.isButton() || interaction.isStringSelectMenu()) changed = await handleComponent(interaction, ctx);
+    else if (interaction.isModalSubmit()) changed = await handleModal(interaction, ctx);
     if (changed) store.scheduleSave(state);
   } catch (err) {
-    console.error(`[bot] /${interaction.commandName} 처리 중 오류:`, err);
+    console.error(`[bot] 상호작용 처리 중 오류 (${interaction.customId || interaction.commandName}):`, err);
+    if (interaction.isAutocomplete()) return;
     const msg = { content: '⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.', flags: MessageFlags.Ephemeral };
     if (interaction.replied || interaction.deferred) await interaction.followUp(msg).catch(() => {});
     else await interaction.reply(msg).catch(() => {});

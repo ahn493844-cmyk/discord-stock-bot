@@ -1,0 +1,69 @@
+# 15분마다 실제 시세·차트 이미지를 만들어 GitHub Pages에 올린다.
+# 봇(Railway)은 여기서 만든 quotes.json과 차트 PNG를 가져다 쓰기만 한다.
+#
+# 처음 한 번: 저장소 Settings → Pages → Source 를 "GitHub Actions" 로 설정해야 한다.
+name: 시세·차트 생성
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/assets.js'
+      - 'tools/charts/**'
+      - '.github/workflows/charts.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/charts/package-lock.json
+
+      # 일봉 데이터 캐시 (6시간마다만 새로 받기 위해)
+      - uses: actions/cache@v4
+        with:
+          path: tools/charts/.cache
+          key: charts-data-${{ github.run_id }}
+          restore-keys: charts-data-
+
+      - name: 의존성 설치
+        working-directory: tools/charts
+        run: npm ci --no-audit --no-fund
+
+      - name: 시세·차트 생성
+        working-directory: tools/charts
+        run: node build.js
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: tools/charts/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

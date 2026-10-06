@@ -1,7 +1,7 @@
-// 실제 시세 가져오기 — 업비트(코인), 야후 파이낸스(주식·ETF·선물·금·환율)
-//
-// 야후는 종목마다 한 번씩 요청해야 해서, 매 틱마다 "갱신할 때가 된" 종목 중
-// 오래된 것부터 최대 YAHOO_PER_TICK개만 요청한다 (요청이 몰려 차단되는 것을 막기 위함).
+// 실제 시세 가져오기 — Railway 부하를 최소화하는 순서로:
+//  1) 코인: 업비트에서 매 틱 한 번에 (요청 1건)
+//  2) 나머지: GitHub Actions가 15분마다 만들어 GitHub Pages에 올린 quotes.json (3분마다 요청 1건)
+//  3) Pages 시세가 오래됐거나 못 받으면 그때만 야후에서 직접 받는다 (순환 방식, 틱당 최대 YAHOO_PER_TICK개)
 
 const { ASSETS } = require('./assets');
 
@@ -11,6 +11,9 @@ const OPEN_INTERVAL_MS = (Number(process.env.YAHOO_REFRESH_SECONDS) || 180) * 10
 const CLOSED_INTERVAL_MS = 30 * 60 * 1000;                                           // 장 마감 종목 갱신 주기
 const PER_TICK = Number(process.env.YAHOO_PER_TICK) || 20;
 const CONCURRENCY = 4;
+const PAGES_URL = (process.env.PAGES_URL || 'https://ahn493844-cmyk.github.io/discord-stock-bot').replace(/\/$/, '');
+const PAGES_INTERVAL_MS = 3 * 60 * 1000;
+const PAGES_STALE_MS = 45 * 60 * 1000; // 이보다 오래된 Pages 시세면 야후 직접 조회로 대신한다
 
 // 환율: 달러·엔화 상품을 원화로 바꿀 때 쓴다 (KRW 기준 1단위 가격)
 const FX_TICKERS = { USD: 'KRW=X', JPY: 'JPYKRW=X' };
@@ -81,7 +84,7 @@ function toKrw(asset, raw, fx) {
   return v;
 }
 
-function apply(market, asset, r, now) {
+function apply(market, asset, r, at) {
   const q = market.assets[asset.id];
   const price = toKrw(asset, r.raw, market.fx);
   if (price == null || !(price > 0)) return false;
@@ -89,8 +92,35 @@ function apply(market, asset, r, now) {
   q.raw = r.raw;
   q.prevClose = toKrw(asset, r.prevCloseRaw, market.fx);
   q.period = r.period;
-  q.updatedAt = now;
+  q.updatedAt = at;
   return true;
+}
+
+// GitHub Pages의 quotes.json 반영. 성공하면 true
+async function refreshFromPages(market, fetchImpl, now, summary, force) {
+  if (!force && now - (market.pagesFetchedAt || 0) < PAGES_INTERVAL_MS) return now - (market.pagesOkAt || 0) < PAGES_STALE_MS;
+  market.pagesFetchedAt = now;
+  try {
+    const data = await getJson(`${PAGES_URL}/data/quotes.json?t=${now}`, fetchImpl);
+    if (!data || !data.quotes || !(now - data.generatedAt < PAGES_STALE_MS)) {
+      summary.errors.push(`Pages 시세가 오래됨 (${data && data.generatedAt ? new Date(data.generatedAt).toISOString() : '없음'})`);
+      return false;
+    }
+    market.fx = { ...market.fx, ...data.fx };
+    for (const a of ASSETS) {
+      const r = data.quotes[a.id];
+      if (a.source !== 'yahoo' || !r) continue;
+      if (apply(market, a, r, data.generatedAt)) summary.ok++;
+      else summary.fail++;
+    }
+    market.chartsVersion = data.generatedAt;
+    market.pagesOkAt = now;
+    summary.source = 'pages';
+    return true;
+  } catch (err) {
+    summary.errors.push(`Pages: ${err.message}`);
+    return now - (market.pagesOkAt || 0) < PAGES_STALE_MS;
+  }
 }
 
 function isDue(q, now) {
@@ -103,7 +133,7 @@ function isDue(q, now) {
 // force: 봇 시작 시 — 환율과 시세가 없는 종목을 제한 없이 요청
 async function refreshPrices(market, { fetchImpl = fetch, now = Date.now(), force = false } = {}) {
   market.fx = market.fx || {};
-  const summary = { ok: 0, fail: 0, errors: [] };
+  const summary = { ok: 0, fail: 0, errors: [], source: null };
   const fetchOne = async (a) => {
     const q = market.assets[a.id];
     q.attemptedAt = now;
@@ -132,7 +162,11 @@ async function refreshPrices(market, { fetchImpl = fetch, now = Date.now(), forc
     summary.errors.push(`업비트: ${err.message}`);
   }
 
-  // 2) 환율 먼저 (달러·엔화 상품 환산에 필요)
+  // 2) GitHub Pages 시세 (정상이면 야후 직접 조회는 하지 않는다)
+  if (await refreshFromPages(market, fetchImpl, now, summary, force)) return summary;
+  summary.source = 'yahoo';
+
+  // 3) 대체 경로: 야후 직접 조회. 환율 먼저 (달러·엔화 상품 환산에 필요)
   for (const [cur, ticker] of Object.entries(FX_TICKERS)) {
     const a = ASSETS.find((x) => x.ticker === ticker);
     const q = a && market.assets[a.id];
@@ -141,7 +175,7 @@ async function refreshPrices(market, { fetchImpl = fetch, now = Date.now(), forc
     if (r && r.raw > 0) market.fx[cur] = r.raw;
   }
 
-  // 3) 나머지 야후 종목: 갱신할 때가 된 것 중 오래된 순서로
+  // 나머지 야후 종목: 갱신할 때가 된 것 중 오래된 순서로
   const fxTickers = new Set(Object.values(FX_TICKERS));
   const due = ASSETS
     .filter((a) => a.source === 'yahoo' && !fxTickers.has(a.ticker))
@@ -154,4 +188,4 @@ async function refreshPrices(market, { fetchImpl = fetch, now = Date.now(), forc
   return summary;
 }
 
-module.exports = { refreshPrices, fetchYahoo, fetchUpbit, toKrw, FX_TICKERS };
+module.exports = { refreshPrices, fetchYahoo, fetchUpbit, toKrw, FX_TICKERS, PAGES_URL };

@@ -18,11 +18,12 @@ function yahooBody(price, prev, period) {
   };
 }
 
-function fakeFetch({ failYahoo = new Set() } = {}) {
+function fakeFetch({ failYahoo = new Set(), pages = null } = {}) {
   const calls = [];
   const fn = async (url) => {
     calls.push(url);
     const json = (body) => ({ ok: true, status: 200, json: async () => body });
+    if (url.includes('github.io')) return pages ? json(pages) : { ok: false, status: 404, json: async () => ({}) };
     if (url.includes('api.upbit.com')) {
       const markets = new URL(url).searchParams.get('markets').split(',');
       return json(markets.map((m) => ({ market: m, trade_price: m === 'KRW-BTC' ? 100_000_000 : 1000, prev_closing_price: 900, trade_timestamp: NOW })));
@@ -57,7 +58,7 @@ test('일부 실패해도 나머지는 갱신되고 이전 가격은 유지된�
   m.assets.TSLA.price = 123;
   const r = await refreshPrices(m, { fetchImpl: fakeFetch({ failYahoo: new Set(['TSLA']) }), now: NOW, force: true });
   assert.strictEqual(r.fail, 1);
-  assert.match(r.errors[0], /테슬라/);
+  assert.ok(r.errors.some((e) => /테슬라/.test(e)), r.errors.join());
   assert.strictEqual(m.assets.TSLA.price, 123);
   assert.strictEqual(m.assets.AAPL.price, 280_000);
 });
@@ -100,4 +101,44 @@ test('실패한 종목은 바로 다시 요청하지 않는다', async () => {
   const n = f.calls.filter((u) => u.includes('TSLA')).length;
   await refreshPrices(m, { fetchImpl: f, now: NOW + 30_000 });
   assert.strictEqual(f.calls.filter((u) => u.includes('TSLA')).length, n);
+});
+
+test('GitHub Pages 시세가 최신이면 야후를 직접 부르지 않는다', async () => {
+  const m = createMarket(NOW);
+  const pages = {
+    generatedAt: NOW - 5 * 60e3,
+    fx: { USD: 1400, JPY: 9.5 },
+    quotes: {
+      AAPL: { raw: 200, prevCloseRaw: 190, time: NOW, period: null },
+      '005930': { raw: 70000, prevCloseRaw: 69000, time: NOW, period: null },
+    },
+  };
+  const f = fakeFetch({ pages });
+  const r = await refreshPrices(m, { fetchImpl: f, now: NOW, force: true });
+  assert.strictEqual(r.source, 'pages');
+  assert.strictEqual(f.calls.filter((u) => u.includes('yahoo')).length, 0);
+  assert.strictEqual(m.assets.AAPL.price, 280_000);
+  assert.strictEqual(m.assets['005930'].prevClose, 69000);
+  assert.strictEqual(m.chartsVersion, pages.generatedAt);
+  // 3분 안에는 Pages도 다시 부르지 않는다 (코인만)
+  const before = f.calls.length;
+  await refreshPrices(m, { fetchImpl: f, now: NOW + 60e3 });
+  assert.deepStrictEqual(f.calls.slice(before).map((u) => new URL(u).hostname), ['api.upbit.com']);
+});
+
+test('Pages 시세가 오래됐으면 야후 직접 조회로 대신한다', async () => {
+  const m = createMarket(NOW);
+  const f = fakeFetch({ pages: { generatedAt: NOW - 2 * 3600e3, fx: {}, quotes: {} } });
+  const r = await refreshPrices(m, { fetchImpl: f, now: NOW, force: true });
+  assert.strictEqual(r.source, 'yahoo');
+  assert.ok(f.calls.some((u) => u.includes('yahoo')));
+  assert.strictEqual(m.assets.AAPL.price, 280_000);
+});
+
+test('재시작(force) 때는 최근에 받았어도 Pages를 바로 다시 읽는다', async () => {
+  const m = createMarket(NOW);
+  m.pagesFetchedAt = NOW - 1000;
+  const f = fakeFetch({ pages: { generatedAt: NOW, fx: { USD: 1400 }, quotes: {} } });
+  await refreshPrices(m, { fetchImpl: f, now: NOW, force: true });
+  assert.ok(f.calls.some((u) => u.includes('github.io')));
 });
