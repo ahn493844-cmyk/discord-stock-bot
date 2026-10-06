@@ -10,27 +10,49 @@ const BANKRUPT_LIMIT = 10_000; // 총자산이 이보다 적으면 파산 신청
 class GameError extends Error {}
 
 function createState(now = Date.now()) {
-  return { version: 1, market: createMarket(now), guilds: {} };
+  return { version: 2, market: createMarket(now), users: {}, guilds: {} };
 }
 
 function normalizeState(state) {
   if (!state || !state.market) return createState();
   syncMarket(state.market);
   state.guilds = state.guilds || {};
+  state.users = state.users || {};
+  migrateGuildAccounts(state);
+  state.version = 2;
   return state;
 }
 
+// v1(서버별 계좌) → v2(모든 서버 공용 계좌). 여러 서버에 계좌가 있으면 총자산이 가장 큰 계좌를 남긴다.
+function migrateGuildAccounts(state) {
+  for (const [guildId, g] of Object.entries(state.guilds)) {
+    if (!g.users) continue;
+    for (const [userId, acc] of Object.entries(g.users)) {
+      const cur = state.users[userId];
+      const guilds = new Set([...(cur?.guilds || []), guildId]);
+      const keep = !cur || portfolioValue(state, acc).total > portfolioValue(state, cur).total ? acc : cur;
+      state.users[userId] = { ...keep, guilds: [...guilds] };
+    }
+    delete g.users;
+  }
+}
+
 function getGuild(state, guildId) {
-  if (!state.guilds[guildId]) state.guilds[guildId] = { newsChannelId: null, users: {} };
+  if (!state.guilds[guildId]) state.guilds[guildId] = { newsChannelId: null };
   return state.guilds[guildId];
 }
 
-function getUser(state, guildId, userId, now = Date.now()) {
-  const g = getGuild(state, guildId);
-  if (!g.users[userId]) {
-    g.users[userId] = { cash: START_CASH, holdings: {}, realized: 0, lastDaily: null, createdAt: now };
+// 계좌를 가져오고(없으면 개설), guildId가 주어지면 그 서버에서 활동했다고 기록한다
+function getUser(state, userId, guildId = null, now = Date.now()) {
+  if (!state.users[userId]) {
+    state.users[userId] = {
+      cash: START_CASH, holdings: {}, realized: 0, lastDaily: null, createdAt: now, guilds: [],
+    };
   }
-  return g.users[userId];
+  const user = state.users[userId];
+  if (!user.guilds) user.guilds = [];
+  if (guildId && !user.guilds.includes(guildId)) user.guilds.push(guildId);
+  return user;
 }
 
 function price(state, symbol) {
@@ -64,9 +86,9 @@ function maxBuyable(cash, p) {
   return q;
 }
 
-function buy(state, guildId, userId, symbol, qtyInput) {
+function buy(state, userId, guildId, symbol, qtyInput) {
   if (!state.market.stocks[symbol]) throw new GameError('존재하지 않는 종목입니다.');
-  const user = getUser(state, guildId, userId);
+  const user = getUser(state, userId, guildId);
   const p = price(state, symbol);
   const qty = parseQuantity(qtyInput, maxBuyable(user.cash, p));
   if (qty <= 0) throw new GameError('매수할 수 있는 수량이 없습니다. 잔고를 확인해 주세요.');
@@ -83,9 +105,9 @@ function buy(state, guildId, userId, symbol, qtyInput) {
   return { symbol, qty, price: p, cost, fee: f, cash: user.cash, holding: { ...h } };
 }
 
-function sell(state, guildId, userId, symbol, qtyInput) {
+function sell(state, userId, guildId, symbol, qtyInput) {
   if (!state.market.stocks[symbol]) throw new GameError('존재하지 않는 종목입니다.');
-  const user = getUser(state, guildId, userId);
+  const user = getUser(state, userId, guildId);
   const h = user.holdings[symbol];
   if (!h || h.qty <= 0) throw new GameError('보유하지 않은 종목입니다.');
   const qty = parseQuantity(qtyInput, h.qty);
@@ -102,8 +124,8 @@ function sell(state, guildId, userId, symbol, qtyInput) {
   return { symbol, qty, price: p, revenue, fee: f, profit, cash: user.cash, remaining: h.qty };
 }
 
-function claimDaily(state, guildId, userId, now = Date.now()) {
-  const user = getUser(state, guildId, userId, now);
+function claimDaily(state, userId, guildId, now = Date.now()) {
+  const user = getUser(state, userId, guildId, now);
   const today = kstDayKey(now);
   if (user.lastDaily === today) throw new GameError('오늘은 이미 출석했습니다. 내일 다시 와 주세요! (자정 KST 초기화)');
   user.lastDaily = today;
@@ -111,23 +133,24 @@ function claimDaily(state, guildId, userId, now = Date.now()) {
   return { bonus: DAILY_BONUS, cash: user.cash };
 }
 
-function bankrupt(state, guildId, userId, now = Date.now()) {
-  const user = getUser(state, guildId, userId, now);
+function bankrupt(state, userId, guildId, now = Date.now()) {
+  const user = getUser(state, userId, guildId, now);
   const { total } = portfolioValue(state, user);
   if (total >= BANKRUPT_LIMIT) {
     throw new GameError(`총자산이 ${won(BANKRUPT_LIMIT)} 미만일 때만 파산 신청이 가능합니다. (현재 ${won(total)})`);
   }
-  const g = getGuild(state, guildId);
   const bankruptcies = (user.bankruptcies || 0) + 1;
-  g.users[userId] = {
+  state.users[userId] = {
     cash: START_CASH, holdings: {}, realized: 0, lastDaily: user.lastDaily, createdAt: now, bankruptcies,
+    guilds: user.guilds,
   };
   return { cash: START_CASH, bankruptcies };
 }
 
-function ranking(state, guildId, limit = 10) {
-  const g = getGuild(state, guildId);
-  return Object.entries(g.users)
+// guildId를 주면 그 서버에서 활동한 사람만, 없으면 전체 순위
+function ranking(state, guildId = null, limit = 10) {
+  return Object.entries(state.users)
+    .filter(([, u]) => !guildId || (u.guilds || []).includes(guildId))
     .map(([userId, u]) => ({ userId, ...portfolioValue(state, u) }))
     .sort((a, b) => b.total - a.total)
     .slice(0, limit);
