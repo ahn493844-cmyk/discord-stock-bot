@@ -4,11 +4,11 @@
 const { ASSETS, findAsset, unitOf } = require('./assets');
 const { createMarket, syncMarket, price: marketPrice, kstDayKey } = require('./market');
 const { optionPrice, intrinsic, YEAR_MS } = require('./options');
+const life = require('./life');
 
-const START_CASH = 1_000_000;
+const START_CASH = 1_000_000;    // 출신 제도 이전 계좌의 기준 시작 자금
 const FEE_RATE = 0.0015;          // 현물·옵션 수수료 0.15%
 const FUTURES_FEE_RATE = 0.0005;  // 선물 수수료 0.05% (명목금액 기준)
-const DAILY_BONUS = 50_000;
 const BANKRUPT_LIMIT = 10_000;
 
 const CREDIT_MARGIN = 0.5;        // 신용매수: 본인 돈 50%, 나머지 대출
@@ -37,14 +37,38 @@ function createState(now = Date.now()) {
   return { version: 3, market: createMarket(now), users: {}, guilds: {}, lastRiskAt: now };
 }
 
+// 출신·직업 뽑기 (테스트에서 고정값으로 바꿀 수 있게 분리)
+let rollLife = () => life.rollLife(Math.random);
+function setLifeRoller(fn) {
+  rollLife = fn;
+}
+
+// 새 계좌: 출신·직업을 뽑아 시작 자금을 정한다. extra로 일부를 지정할 수 있다
 function newAccount(now, extra = {}) {
-  return {
-    cash: START_CASH, holdings: {}, loans: [], futures: [], options: [], nextId: 1,
-    realized: 0, lastDaily: null, createdAt: now, guilds: [], ...extra,
+  const rolled = extra.origin ? {} : rollLife();
+  const acc = {
+    holdings: {}, loans: [], futures: [], options: [], nextId: 1,
+    realized: 0, lastDaily: null, createdAt: now, guilds: [],
+    lastRebirthAt: now, rebirths: 0,
+    ...rolled, ...extra,
   };
+  if (acc.cash == null) acc.cash = acc.startCash;
+  return acc;
+}
+
+function startCashOf(user) {
+  return (user && user.startCash) || START_CASH;
 }
 
 function ensureAccountFields(u) {
+  // 출신·직업 제도 이전 계좌: 자산은 그대로, 출신은 '1세대 투자자', 직업만 새로 뽑고 바로 환생 가능
+  if (!u.origin) {
+    u.origin = life.LEGACY_ORIGIN.key;
+    u.startCash = u.startCash || START_CASH;
+    u.job = u.job || rollLife().job;
+    u.lastRebirthAt = null;
+    u.rebirths = u.rebirths || 0;
+  }
   u.holdings = u.holdings || {};
   u.loans = u.loans || [];
   u.futures = u.futures || [];
@@ -589,9 +613,10 @@ function claimDaily(state, userId, guildId, now = Date.now()) {
   const user = getUser(state, userId, guildId, now);
   const today = kstDayKey(now);
   if (user.lastDaily === today) throw new GameError('오늘은 이미 출석했어요. 내일 다시 와 주세요! (자정 KST 초기화)');
+  const job = life.jobOf(user.job);
   user.lastDaily = today;
-  user.cash += DAILY_BONUS;
-  return { bonus: DAILY_BONUS, cash: user.cash };
+  user.cash += job.pay;
+  return { bonus: job.pay, job, cash: user.cash };
 }
 
 function bankrupt(state, userId, guildId, now = Date.now()) {
@@ -600,9 +625,35 @@ function bankrupt(state, userId, guildId, now = Date.now()) {
   if (total >= BANKRUPT_LIMIT) {
     throw new GameError(`순자산이 ${won(BANKRUPT_LIMIT)} 미만일 때만 파산 신청이 가능해요. (현재 ${won(total)})`);
   }
+  // 파산: 출신·직업은 그대로, 처음 시작 자금으로 다시
   const bankruptcies = (user.bankruptcies || 0) + 1;
-  state.users[userId] = newAccount(now, { lastDaily: user.lastDaily, bankruptcies, guilds: user.guilds });
-  return { cash: START_CASH, bankruptcies };
+  const keep = {
+    origin: user.origin, job: user.job, startCash: startCashOf(user), lastDaily: user.lastDaily, bankruptcies,
+    guilds: user.guilds, lastRebirthAt: user.lastRebirthAt, rebirths: user.rebirths || 0,
+  };
+  state.users[userId] = newAccount(now, keep);
+  return { cash: keep.startCash, bankruptcies };
+}
+
+// ── 환생 ─────────────────────────────────────────────────────
+
+function rebirthStatus(user, now = Date.now()) {
+  const readyAt = user.lastRebirthAt ? user.lastRebirthAt + life.REBIRTH_COOLDOWN_MS : 0;
+  return { ready: now >= readyAt, readyAt };
+}
+
+// 모든 자산·포지션·대출을 없애고 출신·직업·시작 자금을 다시 뽑는다
+function rebirth(state, userId, guildId, now = Date.now()) {
+  const user = getUser(state, userId, guildId, now);
+  const st = rebirthStatus(user, now);
+  if (!st.ready) {
+    throw new GameError(`환생은 24시간에 한 번만 할 수 있어요. <t:${Math.floor(st.readyAt / 1000)}:R>에 다시 할 수 있어요.`);
+  }
+  const before = { origin: user.origin, job: user.job, startCash: startCashOf(user), total: portfolioValue(state, user, now).total };
+  const next = newAccount(now, { lastDaily: user.lastDaily, guilds: user.guilds, rebirths: (user.rebirths || 0) + 1 });
+  // newAccount는 extra.origin이 없으면 새로 뽑는다 (위에서 origin을 넘기지 않음)
+  state.users[userId] = next;
+  return { before, after: next };
 }
 
 // guildId를 주면 그 서버에서 활동한 사람만, 없으면 전체 순위
@@ -615,7 +666,7 @@ function ranking(state, guildId = null, limit = 10, now = Date.now()) {
 }
 
 module.exports = {
-  START_CASH, FEE_RATE, FUTURES_FEE_RATE, DAILY_BONUS, BANKRUPT_LIMIT, CREDIT_MARGIN, CREDIT_RATE,
+  START_CASH, FEE_RATE, FUTURES_FEE_RATE, BANKRUPT_LIMIT, CREDIT_MARGIN, CREDIT_RATE,
   MISU_MARGIN, MISU_DAYS, LOAN_LIMIT_RATIO, MAINTENANCE_RATIO, MAX_LEVERAGE, LIQUIDATION_LOSS,
   OPTION_EXPIRIES, ASSETS, BUY_MODES,
   GameError, createState, normalizeState, getGuild, getUser, portfolioValue, loanTotal,
@@ -623,4 +674,5 @@ module.exports = {
   parseQuantity, parseAmount, parseStrike, parseWon, buy, sell, repay, openFuture, closeFuture,
   quoteOption, buyOption, sellOption, processRisk, claimDaily, bankrupt, ranking, won, fmtQty,
   buyLimits, simulate, maxFuturesMargin, maxOptionQty, roundQty, fee,
+  newAccount, startCashOf, setLifeRoller, rebirth, rebirthStatus,
 };

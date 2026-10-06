@@ -15,6 +15,9 @@ const definitions = [
     .addStringOption((o) => o.setName('종목').setDescription('바로 열 종목 (선택)').setAutocomplete(true))
     .setContexts(InteractionContextType.Guild)
     .toJSON(),
+  new SlashCommandBuilder().setName('환생').setDescription('모든 자산을 버리고 출신·직업을 다시 뽑습니다 (24시간에 한 번, 확인 후 실행)')
+    .setContexts(InteractionContextType.Guild)
+    .toJSON(),
 ];
 
 function signedWon(n) {
@@ -34,12 +37,17 @@ function attempt(fn) {
 // /주식
 async function handleCommand(interaction, { state }) {
   const now = Date.now();
-  game.getUser(state, interaction.user.id, interaction.guildId, now);
-  const target = interaction.options.getString('종목');
-  const asset = target && findAsset(target);
-  const view = asset
-    ? ui.assetView(state, interaction.user, asset.id, '1d', now)
-    : ui.homeView(state, interaction.user, now, target ? { error: true, text: '⚠️ 종목을 찾지 못해서 홈을 열었어요.' } : null);
+  const isNew = !state.users[interaction.user.id];
+  const acc = game.getUser(state, interaction.user.id, interaction.guildId, now);
+  let view;
+  if (interaction.commandName === '환생') {
+    view = isNew ? ui.homeView(state, interaction.user, now, ui.birthNotice(acc)) : ui.rebirthConfirmView(state, interaction.user, now);
+  } else {
+    const target = interaction.options.getString('종목');
+    const asset = target && findAsset(target);
+    const notice = isNew ? ui.birthNotice(acc) : target && !asset ? { error: true, text: '⚠️ 종목을 찾지 못해서 홈을 열었어요.' } : null;
+    view = asset && !isNew ? ui.assetView(state, interaction.user, asset.id, '1d', now) : ui.homeView(state, interaction.user, now, notice);
+  }
   const msg = render(view);
   await interaction.reply({ ...msg, flags: msg.flags | MessageFlags.Ephemeral });
   return true;
@@ -124,10 +132,25 @@ async function handleComponent(interaction, { state }) {
     case 'daily': {
       const r = attempt(() => {
         const d = game.claimDaily(state, user.id, gid, now);
-        return `🎁 출석 보상 **${won(d.bonus)}** 받았어요! 현금 ${won(d.cash)}`;
+        return `🎁 ${d.job.emoji} ${d.job.name} 출석 보상 **${won(d.bonus)}** 받았어요! 현금 ${won(d.cash)}`;
       });
       changed = r.changed;
       await show(ui.homeView(state, user, now, r.notice));
+      break;
+    }
+    case 'rb':
+      await show(ui.rebirthConfirmView(state, user, now));
+      break;
+    case 'rbok': {
+      // 확인 화면의 버튼으로만 실행된다
+      try {
+        const r = game.rebirth(state, user.id, gid, now);
+        changed = true;
+        await show(ui.rebirthResultView(state, user, r, now));
+      } catch (err) {
+        if (!(err instanceof game.GameError)) throw err;
+        await show(ui.rebirthConfirmView(state, user, now, { error: true, text: `⚠️ ${err.message}` }));
+      }
       break;
     }
     case 'bankrupt': {

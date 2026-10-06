@@ -2,6 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const game = require('../src/game');
+
+// 출신·직업 뽑기를 고정: 동수저 · 회사원(일급 10만) · 시작 자금 100만원
+game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
 const { ASSETS, CATEGORIES } = require('../src/assets');
 const { handleCommand, handleComponent, handleModal, autocomplete, definitions } = require('../src/commands');
 
@@ -112,8 +115,8 @@ function harness(state) {
     get screen() { return screen; },
     get modal() { return modal; },
     shared,
-    async command(target) {
-      await handleCommand(base({ options: { getString: () => target ?? null } }), { state });
+    async command(target, commandName = '주식') {
+      await handleCommand(base({ commandName, options: { getString: () => target ?? null } }), { state });
       return checkMessage(screen, `/주식 ${target || ''}`);
     },
     async click(customId) {
@@ -150,8 +153,8 @@ function harness(state) {
   };
 }
 
-test('/주식 명령어는 하나뿐이다', () => {
-  assert.deepStrictEqual(definitions.map((d) => d.name), ['주식']);
+test('명령어는 /주식, /환생 두 개', () => {
+  assert.deepStrictEqual(definitions.map((d) => d.name), ['주식', '환생']);
 });
 
 test('홈 → 분류 → 페이지 이동 → 종목 → 차트 기간 전환', async () => {
@@ -428,4 +431,54 @@ test('포지션이 많아도 제한을 지키고 나머지는 메뉴로', async 
   assert.ok(pos.ids.has('stk|close'));
   await h.click('stk|pf');
   await h.click('stk|rank|all');
+});
+
+test('처음 /주식: 운명 카드 → 출석은 직업 보상', async () => {
+  const state = makeState();
+  const h = harness(state);
+  const home = await h.command();
+  assert.match(h.notice(), /운명이 정해졌어요/);
+  assert.match(home.text, /동수저 · 💼 회사원/);
+  await h.click('stk|daily');
+  assert.match(h.notice(), /회사원 출석 보상 \*\*100,000원\*\*/);
+  // 두 번째부터는 운명 카드 없음
+  await h.command();
+  assert.doesNotMatch(h.notice(), /운명이 정해졌어요/);
+});
+
+test('/환생: 경고·확인 화면 → 24시간 쿨다운 → 실행하면 새 인생', async () => {
+  const state = makeState();
+  const h = harness(state);
+  await h.command();
+  game.buy(state, 'u1', 'g1', '005930', '3', 'credit');
+  // 막 태어났으면 24시간 동안 환생 불가 (버튼 비활성)
+  let c = await h.command(null, '환생');
+  assert.match(c.text, /정말 환생하시겠어요/);
+  assert.match(c.text, /사라지는 것[\s\S]*보유 종목 1개[\s\S]*대출/);
+  const rows = c.rows.flatMap((r) => r.components);
+  assert.ok(rows.find((b) => b.custom_id === 'stk|rbok').disabled);
+  await h.click('stk|rbok'); // 그래도 누르면 거절
+  assert.match(h.notice(), /24시간에 한 번/);
+  assert.ok(game.getUser(state, 'u1').holdings['005930']);
+
+  // 하루 지난 것으로
+  game.getUser(state, 'u1').lastRebirthAt -= 25 * 3600e3;
+  game.setLifeRoller(() => ({ origin: 'gold', job: 'doctor', startCash: 150_000_000 }));
+  try {
+    c = await h.click('stk|rb');
+    assert.ok(!c.rows.flatMap((r) => r.components).find((b) => b.custom_id === 'stk|rbok').disabled);
+    const done = await h.click('stk|rbok');
+    assert.match(done.text, /새로운 인생이 시작됐어요/);
+    assert.match(done.text, /금수저[\s\S]*150,000,000원[\s\S]*의사[\s\S]*400,000원/);
+    const u = game.getUser(state, 'u1');
+    assert.strictEqual(u.cash, 150_000_000);
+    assert.deepStrictEqual(u.holdings, {});
+    assert.strictEqual(u.loans.length, 0);
+    assert.strictEqual(u.rebirths, 1);
+    // 수익률은 새 시작 자금 기준
+    const home = await h.click('stk|home');
+    assert.match(home.text, /시작 자금 150,000,000원 대비/);
+  } finally {
+    game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
+  }
 });

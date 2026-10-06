@@ -10,6 +10,7 @@ const {
 const game = require('./game');
 const { ASSETS, CATEGORIES, findAsset, unitOf, HOME_HEATMAP } = require('./assets');
 const v2 = require('./v2');
+const life = require('./life');
 const { quote, isOpen, marketStatus } = require('./market');
 const { PAGES_URL } = require('./prices');
 
@@ -108,6 +109,91 @@ function categorySelect(selected) {
 
 // ── 홈 ───────────────────────────────────────────────────────
 
+// 1500000000 → "15억", 3500000 → "350만"
+function shortWon(n) {
+  const eok = Math.floor(n / 1e8);
+  const man = Math.round((n % 1e8) / 1e4);
+  return `${eok ? `${eok}억` : ''}${man ? `${eok ? ' ' : ''}${man.toLocaleString('ko-KR')}만` : ''}원` || '0원';
+}
+
+// "🪵 흙수저 · 💼 회사원" 같은 한 줄
+function identity(acc) {
+  const o = life.originOf(acc && acc.origin);
+  const j = life.jobOf(acc && acc.job);
+  return `${o.emoji} ${o.name} · ${j.emoji} ${j.name}`;
+}
+
+// 출신·직업 뽑기 결과 카드 내용
+function lifeCardText(acc) {
+  const o = life.originOf(acc.origin);
+  const j = life.jobOf(acc.job);
+  return `${o.emoji} **${o.name}**${o.weight ? ` (확률 ${o.weight}%)` : ''} — ${o.desc}\n` +
+    `　시작 자금 **${won(game.startCashOf(acc))}**\n` +
+    `${j.emoji} **${j.name}** (확률 ${j.weight}%)\n` +
+    `　매일 출석 보상 **${won(j.pay)}**`;
+}
+
+function birthNotice(acc) {
+  return { text: `## 🎲 운명이 정해졌어요!\n${lifeCardText(acc)}` };
+}
+
+// 환생 확인 화면 (경고)
+function rebirthConfirmView(state, user, now, notice) {
+  const acc = game.getUser(state, user.id, null, now);
+  const v = game.portfolioValue(state, acc, now);
+  const st = game.rebirthStatus(acc, now);
+  const lose = [
+    `현금 ${won(v.cash)}`,
+    Object.keys(acc.holdings).length ? `보유 종목 ${Object.keys(acc.holdings).length}개 (${won(v.stock)})` : null,
+    acc.futures.length ? `선물 ${acc.futures.length}건` : null,
+    acc.options.length ? `옵션 ${acc.options.length}건` : null,
+    acc.loans.length ? `대출 ${won(v.loans)}` : null,
+  ].filter(Boolean).join(' · ');
+  const odds = life.ORIGINS.map((o) => `${o.emoji} ${o.name} ${o.weight}% · ${shortWon(o.min)}~${shortWon(o.max)}`).join('\n');
+  return {
+    v2: [
+      v2.noticeContainer(notice),
+      v2.container(COLOR_ERR, [
+        v2.text('## ⚠️ 정말 환생하시겠어요?\n지금의 인생을 **모두 버리고** 출신과 직업을 처음부터 다시 뽑아요.\n**되돌릴 수 없어요.**'),
+        v2.sep(),
+        v2.text(`### 사라지는 것\n${identity(acc)}\n순자산 **${won(v.total)}**\n-# ${lose}`),
+        v2.sep(),
+        v2.text(`### 새로 뽑을 확률\n-# ${odds.replace(/\n/g, '\n-# ')}\n-# 직업은 백수(출석 1만원)부터 톱스타(출석 100만원)까지`),
+        v2.sep(),
+        st.ready
+          ? v2.text('-# 환생하면 24시간 동안 다시 환생할 수 없어요. 오늘 출석 보상은 이미 받았다면 새 인생에서도 내일부터 받을 수 있어요.')
+          : v2.text(`⏳ 아직 환생할 수 없어요. <t:${Math.floor(st.readyAt / 1000)}:R>에 가능해요.`),
+        row(
+          btn(id('rbok'), '모두 버리고 환생하기', ButtonStyle.Danger, { emoji: '💀', disabled: !st.ready }),
+          btn(id('home'), '취소', ButtonStyle.Secondary),
+        ),
+      ]),
+    ],
+  };
+}
+
+// 환생 결과 화면
+function rebirthResultView(state, user, result, now) {
+  const before = life.originOf(result.before.origin);
+  const bjob = life.jobOf(result.before.job);
+  const next = game.rebirthStatus(result.after, now);
+  return {
+    v2: [
+      v2.container(COLOR_OK, [
+        v2.text(`## 🌱 새로운 인생이 시작됐어요!\n-# 이전 인생: ${before.emoji} ${before.name} · ${bjob.emoji} ${bjob.name} · 순자산 ${won(result.before.total)}`),
+        v2.sep(),
+        v2.text(lifeCardText(result.after)),
+        v2.sep(),
+        v2.text(`-# 다음 환생은 <t:${Math.floor(next.readyAt / 1000)}:R>에 할 수 있어요.`),
+        row(
+          btn(id('home'), '새 인생 시작하기', ButtonStyle.Success, { emoji: '🏠' }),
+          btn(id('pf'), '내 자산', ButtonStyle.Secondary, { emoji: '💼' }),
+        ),
+      ]),
+    ],
+  };
+}
+
 // 등락률 → 버튼 색 (한국 증시 관례: 상승 빨강, 하락 파랑, 보합 회색)
 function changeStyle(ch) {
   if (ch == null || Math.abs(ch) < 0.005) return ButtonStyle.Secondary;
@@ -145,15 +231,16 @@ function assetRow(state, a, now, key) {
 function homeView(state, user, now, notice) {
   const acc = game.getUser(state, user.id, null, now);
   const v = game.portfolioValue(state, acc, now);
-  const profit = v.total - game.START_CASH;
+  const start = game.startCashOf(acc);
+  const profit = v.total - start;
   return {
     v2: [
       v2.noticeContainer(notice),
       v2.container(profit >= 0 ? COLOR_UP : COLOR_DOWN, [
         v2.section(
-          `-# 💼 ${user.displayName ?? user.username}님의 주식 터미널\n` +
+          `-# 💼 ${user.displayName ?? user.username}님의 주식 터미널 · ${identity(acc)}\n` +
           `# ${won(v.total)}\n` +
-          `${fmtPct(pct(game.START_CASH, v.total))} (${signedWon(profit)}) · 시작 자금 ${won(game.START_CASH)} 대비`,
+          `${fmtPct(pct(start, v.total))} (${signedWon(profit)}) · 시작 자금 ${won(start)} 대비`,
           { thumbnail: user.displayAvatarURL() },
         ),
         v2.text(`💰 현금 **${won(v.cash)}**　📊 투자 **${won(v.stock + v.futures + v.options)}**　💳 대출 **${won(v.loans)}**`),
@@ -168,9 +255,10 @@ function homeView(state, user, now, notice) {
           btn(id('rank', 'all'), '랭킹', ButtonStyle.Secondary, { emoji: '🏆' }),
         ),
         row(
-          btn(id('daily'), '출석 보상', ButtonStyle.Success, { emoji: '🎁' }),
+          btn(id('daily'), `출석 +${won(life.jobOf(acc.job).pay)}`, ButtonStyle.Success, { emoji: '🎁' }),
           btn(id('help'), '도움말', ButtonStyle.Secondary, { emoji: '❓' }),
           btn(id('home'), '새로고침', ButtonStyle.Secondary, { emoji: '🔄' }),
+          btn(id('rb'), '환생', ButtonStyle.Secondary, { emoji: '🌱' }),
         ),
         v2.text(`-# ${ASSETS.length}종목 · 24시간 거래 (💤 장 마감 종목은 종가 기준) · 이 화면은 나만 보여요`),
       ]),
@@ -311,7 +399,8 @@ function assetView(state, user, assetId, range = '1d', now, notice) {
 function portfolioEmbed(state, user, now) {
   const acc = game.getUser(state, user.id, null, now);
   const v = game.portfolioValue(state, acc, now);
-  const profit = v.total - game.START_CASH;
+  const start = game.startCashOf(acc);
+  const profit = v.total - start;
   const holdings = Object.entries(acc.holdings)
     .map(([hid, h]) => {
       const a = findAsset(hid);
@@ -325,7 +414,8 @@ function portfolioEmbed(state, user, now) {
     .setColor(profit >= 0 ? COLOR_UP : COLOR_DOWN)
     .addFields(
       { name: '🏦 순자산', value: won(v.total), inline: true },
-      { name: '📈 누적 수익', value: `${signedWon(profit)}\n${fmtPct(pct(game.START_CASH, v.total))}`, inline: true },
+      { name: '📈 누적 수익', value: `${signedWon(profit)}\n${fmtPct(pct(start, v.total))}`, inline: true },
+      { name: '🏷️ 출신·직업', value: identity(acc), inline: true },
       { name: '✅ 실현 손익', value: signedWon(acc.realized), inline: true },
       { name: '💰 현금', value: won(v.cash), inline: true },
       { name: '📊 현물', value: won(v.stock), inline: true },
@@ -342,7 +432,8 @@ function portfolioView(state, target, now, notice, viewerId = target.id) {
   const mine = target.id === viewerId;
   const acc = game.getUser(state, target.id, null, now);
   const v = game.portfolioValue(state, acc, now);
-  const profit = v.total - game.START_CASH;
+  const start = game.startCashOf(acc);
+  const profit = v.total - start;
   const gross = Math.max(1, v.cash + v.stock + v.futures + v.options);
   const parts = [
     ['💰 현금', v.cash], ['📊 현물', v.stock], ['⚡ 선물', v.futures], ['🎯 옵션', v.options],
@@ -368,8 +459,8 @@ function portfolioView(state, target, now, notice, viewerId = target.id) {
   const rest = holdings.slice(SHOW, SHOW + 25);
   const name = mine ? `${target.displayName ?? target.username}님` : `<@${target.id}>님`;
   const avatar = typeof target.displayAvatarURL === 'function' ? target.displayAvatarURL() : null;
-  const header = `-# 💼 ${name}의 자산\n# ${won(v.total)}\n` +
-    `${fmtPct(pct(game.START_CASH, v.total))} (${signedWon(profit)}) · 실현 손익 ${signedWon(acc.realized)}`;
+  const header = `-# 💼 ${name}의 자산 · ${identity(acc)}\n# ${won(v.total)}\n` +
+    `${fmtPct(pct(start, v.total))} (${signedWon(profit)}) · 시작 자금 ${won(start)} · 실현 손익 ${signedWon(acc.realized)}`;
 
   const buttons = mine
     ? [
@@ -377,6 +468,7 @@ function portfolioView(state, target, now, notice, viewerId = target.id) {
       btn(id('rank', 'all'), '랭킹', ButtonStyle.Secondary, { emoji: '🏆' }),
       homeBtn(),
       btn(id('share', 'pf'), '채널에 공유', ButtonStyle.Success, { emoji: '📢' }),
+      btn(id('rb', 'pf'), '환생', ButtonStyle.Secondary, { emoji: '🌱' }),
     ]
     : [btn(id('rank', 'all'), '랭킹으로', ButtonStyle.Secondary, { emoji: '⬅️' }), homeBtn()];
   if (mine && v.total < game.BANKRUPT_LIMIT) buttons.push(btn(id('bankrupt'), '파산 신청', ButtonStyle.Danger, { emoji: '💀' }));
@@ -506,7 +598,7 @@ function positionsView(state, user, now, notice, selected) {
 function rankingEmbed(state, scope, guildId, now) {
   const medals = ['🥇', '🥈', '🥉'];
   const rows = game.ranking(state, scope === 'guild' ? guildId : null, 10, now).map((r, i) =>
-    `${medals[i] || `**${i + 1}.**`} <@${r.userId}> — ${won(r.total)} (${fmtPct(pct(game.START_CASH, r.total))})`);
+    `${medals[i] || `**${i + 1}.**`} ${life.originOf(state.users[r.userId]?.origin).emoji} <@${r.userId}> — ${won(r.total)} (${fmtPct(pct(game.startCashOf(state.users[r.userId]), r.total))})`);
   return new EmbedBuilder()
     .setTitle(scope === 'guild' ? '🏆 이 서버 순자산 랭킹' : '🏆 전체 서버 순자산 랭킹')
     .setColor(COLOR_INFO)
@@ -518,8 +610,10 @@ function rankingView(state, scope, guildId, now, notice, viewerId) {
   const all = game.ranking(state, g, Infinity, now);
   const medals = ['🥇', '🥈', '🥉'];
   const rows = all.slice(0, 10).map((r, i) => {
-    const ret = pct(game.START_CASH, r.total);
-    return v2.section(`${medals[i] || `**${i + 1}위**`} <@${r.userId}>${r.userId === viewerId ? ' (나)' : ''}\n-# 순자산 ${won(r.total)} · ${signedWon(r.total - game.START_CASH)}`,
+    const acc = state.users[r.userId];
+    const start = game.startCashOf(acc);
+    const ret = pct(start, r.total);
+    return v2.section(`${medals[i] || `**${i + 1}위**`} <@${r.userId}>${r.userId === viewerId ? ' (나)' : ''}\n-# ${identity(acc)} · 순자산 ${won(r.total)} · ${signedWon(r.total - start)}`,
       { button: btn(id('pfu', r.userId), changeLabel(ret), changeStyle(ret)) });
   });
   const myRank = all.findIndex((r) => r.userId === viewerId);
@@ -549,7 +643,7 @@ function helpView() {
   return {
     v2: [
       v2.container(COLOR_INFO, [
-        v2.text(`## 📘 주식 게임 도움말\n처음 쓰면 **${won(game.START_CASH)}**으로 계좌가 열려요. 계좌는 봇이 있는 **모든 서버에서 공용**이에요.\n` +
+        v2.text(`## 📘 주식 게임 도움말\n처음 쓰면 **출신**(시작 자금)과 **직업**(매일 출석 보상)을 랜덤으로 뽑아요. 계좌는 봇이 있는 **모든 서버에서 공용**이에요.\n` +
           `실제 시세 ${ASSETS.length}종목을 **24시간** 거래해요. 💤 장 마감 종목은 마지막 종가로 거래돼요.`),
         v2.sep(),
         v2.section('**📈 시세 보기**\n-# 분류별 목록 → 종목 → 차트·주문', { button: go(id('list', 'kr', 0), '한국 주식', '📂') }),
@@ -557,7 +651,8 @@ function helpView() {
         v2.section(`**💳 신용·미수**\n-# 신용: 내 돈 ${game.CREDIT_MARGIN * 100}% + 대출(연 ${game.CREDIT_RATE * 100}%) · 미수: 증거금 ${game.MISU_MARGIN * 100}%, ${game.MISU_DAYS}일 내 결제 · 담보비율 ${game.MAINTENANCE_RATIO * 100}% 미만이면 반대매매`, { button: go(id('pos', 'loan'), '대출 보기', '💳') }),
         v2.section(`**⚡ 선물 (롱/숏)**\n-# 롱=상승, 숏=하락 베팅 · 최대 ${game.MAX_LEVERAGE}배 · 손실이 증거금 ${game.LIQUIDATION_LOSS * 100}%에 닿으면 강제청산`, { button: go(id('pos', 'fut'), '포지션', '📋') }),
         v2.section('**🎯 옵션 (콜/풋)**\n-# 콜=오를수록, 풋=내릴수록 이익 · 손실은 산 가격까지만 · 만기(1시간/1일/1주)에 자동 정산', { button: go(id('pos', 'opt'), '포지션', '🎯') }),
-        v2.section(`**🏆 랭킹 · 🎁 출석**\n-# 순자산 순위 · 하루 한 번 ${won(game.DAILY_BONUS)}`, { button: go(id('rank', 'all'), '랭킹', '🏆') }),
+        v2.section('**🏆 랭킹 · 🎁 출석**\n-# 순자산 순위 · 출석 보상은 직업마다 달라요 (하루 한 번)', { button: go(id('rank', 'all'), '랭킹', '🏆') }),
+        v2.section('**🌱 환생**\n-# 24시간에 한 번, 모든 자산을 버리고 출신·직업을 다시 뽑아요 (`/환생`)', { button: go(id('rb', 'help'), '환생', '🌱') }),
         v2.text('-# 🔔 반대매매·강제청산·옵션 만기는 DM으로 알려 드려요 (서버 DM 허용 필요)'),
         row(homeBtn()),
       ]),
@@ -610,4 +705,5 @@ function searchResultView(state, query, hits, now) {
 module.exports = {
   id, homeView, listView, assetView, assetEmbed, portfolioView, portfolioEmbed, positionsView, rankingView, rankingEmbed,
   helpView, searchModal, repayModal, searchResultView, chartUrl, RANGES,
+  rebirthConfirmView, rebirthResultView, birthNotice, identity,
 };

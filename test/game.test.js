@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const game = require('../src/game');
+
+// 출신·직업 뽑기를 고정: 동수저 · 회사원(일급 10만) · 시작 자금 100만원
+game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
 const { isOpen } = require('../src/market');
 
 const NOW = Date.UTC(2026, 0, 5, 3); // 월요일 KST 12:00
@@ -168,7 +171,7 @@ test('출석은 하루 한 번', () => {
   game.claimDaily(s, 'u', 'g', NOW);
   assert.throws(() => game.claimDaily(s, 'u', 'g', NOW + 1000), game.GameError);
   game.claimDaily(s, 'u', 'g', NOW + 86400000);
-  assert.strictEqual(game.getUser(s, 'u').cash, game.START_CASH + 2 * game.DAILY_BONUS);
+  assert.strictEqual(game.getUser(s, 'u').cash, game.START_CASH + 2 * 100_000);
 });
 
 test('파산은 순자산이 적을 때만 가능하고 모든 포지션을 초기화한다', () => {
@@ -227,4 +230,46 @@ test('반대매매할 것이 없으면 매 틱 같은 알림을 반복하지 않
   u.loans.push({ id: 1, type: 'credit', amount: 1000, createdAt: NOW, dueAt: null });
   assert.strictEqual(game.processRisk(s, NOW + 1).length, 0);
   assert.strictEqual(game.processRisk(s, NOW + 2).length, 0);
+});
+
+const life = require('../src/life');
+
+test('출신·직업 확률표 합계는 100%, 뽑기는 확률대로 나온다', () => {
+  assert.strictEqual(life.ORIGINS.reduce((s, o) => s + o.weight, 0), 100);
+  assert.strictEqual(life.JOBS.reduce((s, j) => s + j.weight, 0), 100);
+  let seed = 7;
+  const rng = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
+  const count = {};
+  for (let i = 0; i < 20000; i++) {
+    const r = life.rollLife(rng);
+    count[r.origin] = (count[r.origin] || 0) + 1;
+    const o = life.originOf(r.origin);
+    assert.ok(r.startCash >= o.min && r.startCash <= o.max && r.startCash % 100000 === 0);
+  }
+  assert.ok(Math.abs(count.dirt / 20000 - 0.35) < 0.02, JSON.stringify(count));
+  assert.ok(count.chaebol > 100 && count.chaebol < 320, JSON.stringify(count));
+});
+
+test('기존 계좌는 자산 그대로 1세대 투자자가 되고 바로 환생할 수 있다', () => {
+  const s = game.normalizeState({
+    version: 3, market: { assets: {}, fx: {} },
+    users: { old: { cash: 777, holdings: {}, realized: 0, guilds: ['g'], createdAt: 0 } }, guilds: {},
+  }, NOW);
+  const u = s.users.old;
+  assert.strictEqual(u.cash, 777);
+  assert.strictEqual(u.origin, 'legacy');
+  assert.strictEqual(u.startCash, game.START_CASH);
+  assert.ok(life.JOBS.some((j) => j.key === u.job));
+  assert.ok(game.rebirthStatus(u, NOW).ready);
+});
+
+test('파산은 출신·직업을 유지하고 원래 시작 자금으로', () => {
+  const s = fresh();
+  const u = game.getUser(s, 'u', 'g');
+  Object.assign(u, { origin: 'silver', job: 'dev', startCash: 50_000_000, cash: 10 });
+  game.bankrupt(s, 'u', 'g', NOW);
+  const n = game.getUser(s, 'u');
+  assert.strictEqual(n.cash, 50_000_000);
+  assert.strictEqual(n.origin, 'silver');
+  assert.strictEqual(game.claimDaily(s, 'u', 'g', NOW + 86400e3).bonus, 200_000);
 });
