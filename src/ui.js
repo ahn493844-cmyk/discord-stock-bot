@@ -20,7 +20,6 @@ const COLOR_OK = 0x2f9e44;
 const COLOR_ERR = 0xc92a2a;
 const PAGE_SIZE = 20;
 const RANGES = { '1d': '1일', '1w': '1주', '1m': '1달', '1y': '1년' };
-const MODE_LABEL = { cash: '현금', credit: '신용', misu: '미수' };
 
 const id = (...parts) => ['stk', ...parts].join('|');
 
@@ -232,11 +231,11 @@ function assetView(state, user, assetId, range = '1d', now, notice) {
         btn(id('a', asset.id, r, 'refresh'), '새로고침', ButtonStyle.Secondary, { emoji: '🔄' }),
       ),
       row(
-        btn(id('buy', asset.id), '매수', ButtonStyle.Danger, { emoji: '🛒' }),
-        btn(id('sell', asset.id), '매도', ButtonStyle.Primary, { emoji: '💸', disabled: !holding }),
-        btn(id('fut', asset.id, 'long'), '롱 (상승)', ButtonStyle.Secondary, { emoji: '⚡' }),
-        btn(id('fut', asset.id, 'short'), '숏 (하락)', ButtonStyle.Secondary, { emoji: '⚡' }),
-        btn(id('opt', asset.id), '옵션', ButtonStyle.Secondary, { emoji: '🎯' }),
+        btn(id('tb', asset.id, 'cash', '0', 'o'), '매수', ButtonStyle.Danger, { emoji: '🛒' }),
+        btn(id('ts', asset.id, '0', 'o'), '매도', ButtonStyle.Primary, { emoji: '💸', disabled: !holding }),
+        btn(id('tf', asset.id, 'long', '5', '0', 'o'), '롱 (상승)', ButtonStyle.Secondary, { emoji: '⚡' }),
+        btn(id('tf', asset.id, 'short', '5', '0', 'o'), '숏 (하락)', ButtonStyle.Secondary, { emoji: '⚡' }),
+        btn(id('to', asset.id, 'call', '1d', '0', '0', 'o'), '옵션', ButtonStyle.Secondary, { emoji: '🎯' }),
       ),
       row(
         btn(id('list', asset.category, Math.floor(ASSETS.filter((a) => a.category === asset.category).indexOf(asset) / PAGE_SIZE)), '목록', ButtonStyle.Secondary, { emoji: '⬅️' }),
@@ -409,8 +408,8 @@ function helpView() {
       `처음 쓰면 **${won(game.START_CASH)}**으로 계좌가 열려요. 계좌는 봇이 있는 **모든 서버에서 공용**이에요.\n` +
       `실제 시세 ${ASSETS.length}종목을 **24시간** 거래할 수 있어요. 장이 닫힌 종목(💤)은 마지막 종가로 거래돼요.\n​`)
     .addFields(
-      { name: '🧭 사용법', value: '홈 → 분류 선택 또는 🔍 검색 → 종목 화면에서 차트 보고 버튼으로 주문' },
-      { name: '🛒 현물', value: '수량: `10`, `0.01`, `전부`, `절반`, `30%`, `10만원`(그 금액만큼)' },
+      { name: '🧭 사용법', value: '홈 → 분류 선택 또는 🔍 검색 → 종목 화면 → 주문창에서 버튼으로 수량을 고르면 결과를 미리 보여 줘요 → [실행]을 눌러야 체결돼요' },
+      { name: '🛒 현물', value: '버튼으로 수량 조절 · ✏️ 직접 입력: `10`, `0.01`, `전부`, `절반`, `30%`, `10만원`(그 금액만큼)' },
       {
         name: '💳 신용·미수',
         value: `**신용**: 본인 ${game.CREDIT_MARGIN * 100}% + 대출, 연 ${game.CREDIT_RATE * 100}% 이자\n` +
@@ -431,58 +430,15 @@ const textInput = (customId, placeholder, { required = true, value } = {}) => {
   if (value) t.setValue(value);
   return t;
 };
-const label = (text, desc, component, kind = 'text') => {
+const label = (text, desc, component) => {
   const l = new LabelBuilder().setLabel(text);
   if (desc) l.setDescription(desc);
-  return kind === 'select' ? l.setStringSelectMenuComponent(component) : l.setTextInputComponent(component);
+  return l.setTextInputComponent(component);
 };
-const select = (customId, options) => new StringSelectMenuBuilder().setCustomId(customId).addOptions(options);
 
 function searchModal() {
   return new ModalBuilder().setCustomId(id('m_search')).setTitle('🔍 종목 검색')
     .addLabelComponents(label('종목 이름 또는 코드', '예: 삼성, 애플, AAPL, 비트, 코덱스, 원유', textInput('q', '검색어')));
-}
-
-function buyModal(asset, state) {
-  const p = quote(state.market, asset.id)?.price;
-  return new ModalBuilder().setCustomId(id('m_buy', asset.id)).setTitle(clipLabel(`🛒 ${asset.name} 매수`, 45))
-    .addLabelComponents(
-      label('수량', p != null ? `현재가 ${won(p)} · 10, 전부, 절반, 30%, 10만원` : '10, 전부, 절반, 30%, 10만원', textInput('qty', '예: 10')),
-      label('방식', null, select('mode', [
-        { label: '현금', value: 'cash', description: '내 돈으로만', default: true },
-        { label: '신용', value: 'credit', description: `본인 ${game.CREDIT_MARGIN * 100}% + 대출, 연 ${game.CREDIT_RATE * 100}% 이자` },
-        { label: '미수', value: 'misu', description: `증거금 ${game.MISU_MARGIN * 100}%, ${game.MISU_DAYS}일 안에 결제` },
-      ]), 'select'),
-    );
-}
-
-function sellModal(asset, state, userId) {
-  const h = state.users[userId]?.holdings[asset.id];
-  return new ModalBuilder().setCustomId(id('m_sell', asset.id)).setTitle(clipLabel(`💸 ${asset.name} 매도`, 45))
-    .addLabelComponents(label('수량', h ? `보유 ${fmtQty(asset, h.qty)} · 판 돈으로 대출 자동 상환` : null, textInput('qty', '예: 10, 전부, 절반', { value: '전부' })));
-}
-
-function futuresModal(asset, side) {
-  return new ModalBuilder().setCustomId(id('m_fut', asset.id, side)).setTitle(clipLabel(`⚡ ${asset.name} ${side === 'long' ? '롱' : '숏'}`, 45))
-    .addLabelComponents(
-      label('증거금', '넣을 돈 · 예: 10만, 전부, 30%', textInput('margin', '예: 10만')),
-      label('레버리지', `손실이 증거금 ${game.LIQUIDATION_LOSS * 100}%에 닿으면 강제청산`, select('lev', [1, 2, 3, 5, 10, 20, 30, 50]
-        .filter((x) => x <= game.MAX_LEVERAGE)
-        .map((x) => ({ label: `${x}배`, value: String(x), default: x === 5 }))), 'select'),
-    );
-}
-
-function optionModal(asset) {
-  return new ModalBuilder().setCustomId(id('m_opt', asset.id)).setTitle(clipLabel(`🎯 ${asset.name} 옵션 매수`, 45))
-    .addLabelComponents(
-      label('종류', null, select('kind', [
-        { label: '콜 (상승 베팅)', value: 'call', default: true },
-        { label: '풋 (하락 베팅)', value: 'put' },
-      ]), 'select'),
-      label('만기', null, select('expiry', Object.entries(game.OPTION_EXPIRIES).map(([value, e]) => ({ label: e.label, value, default: value === '1d' }))), 'select'),
-      label('수량', `기초자산 몇 ${unitOf(asset)}분인지 · 예: 10, 전부, 10만원`, textInput('qty', '예: 10')),
-      label('행사가', '현재가(기본), +5%, -10%, 75000, 7.5만', textInput('strike', '현재가', { required: false })),
-    );
 }
 
 function repayModal() {
@@ -508,35 +464,7 @@ function searchResultView(state, query, hits, now) {
   return { embeds: [e], components };
 }
 
-// ── 결과 문구 ────────────────────────────────────────────────
-
-function buyText(r) {
-  let s = `🛒 **${MODE_LABEL[r.mode]} 매수 체결** — ${r.asset.name} ${fmtQty(r.asset, r.qty)} × ${won(r.price)} = ${won(r.cost)} (수수료 ${won(r.fee)})`;
-  if (r.loan) {
-    s += r.loan.type === 'misu'
-      ? `\n📝 미수 ${won(r.loan.amount)} · 결제일 ${rel(r.loan.dueAt)}`
-      : `\n💳 신용 대출 ${won(r.loan.amount)} (연 ${game.CREDIT_RATE * 100}%)`;
-  }
-  return `${s}\n💰 남은 현금 ${won(r.cash)}`;
-}
-
-function sellText(r) {
-  return `💸 **매도 체결** — ${r.asset.name} ${fmtQty(r.asset, r.qty)} × ${won(r.price)} = ${won(r.revenue - r.fee)} ` +
-    `(실현 손익 ${signedWon(r.profit)})${r.repaid > 0 ? `\n💳 대출 ${won(r.repaid)} 자동 상환` : ''}\n💰 현금 ${won(r.cash)}`;
-}
-
-function futText(r) {
-  return `⚡ **선물 ${r.pos.side > 0 ? '롱' : '숏'} ${r.pos.leverage}배 진입** \`#${r.pos.id}\` — ${r.asset.name}\n` +
-    `진입가 ${won(r.pos.entry)} · 증거금 ${won(r.pos.margin)} · 규모 ${won(r.pos.margin * r.pos.leverage)} · **청산가 ${won(r.liqPrice)}**`;
-}
-
-function optText(r) {
-  return `🎯 **옵션 매수** \`#${r.opt.id}\` — ${r.asset.name} ${r.kind === 'call' ? '콜' : '풋'} 행사가 ${won(r.strike)} · 만기 ${r.expiryLabel}\n` +
-    `${fmtQty(r.asset, r.qty)}분 × ${won(r.premium)} = ${won(r.cost + r.fee)} (수수료 포함) · 남은 현금 ${won(r.cash)}`;
-}
-
 module.exports = {
   id, homeView, listView, assetView, assetEmbed, portfolioView, portfolioEmbed, positionsView, rankingView, rankingEmbed,
-  helpView, searchModal, buyModal, sellModal, futuresModal, optionModal, repayModal, searchResultView,
-  buyText, sellText, futText, optText, chartUrl, RANGES,
+  helpView, searchModal, repayModal, searchResultView, chartUrl, RANGES,
 };

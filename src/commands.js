@@ -3,6 +3,7 @@
 const { SlashCommandBuilder, InteractionContextType, MessageFlags } = require('discord.js');
 const game = require('./game');
 const ui = require('./ui');
+const tickets = require('./tickets');
 const { findAsset, searchAssets } = require('./assets');
 const { quote } = require('./market');
 
@@ -51,6 +52,14 @@ async function handleComponent(interaction, { state }) {
   const values = interaction.isStringSelectMenu() ? interaction.values : [];
   const show = (view) => interaction.update(view);
   let changed = false;
+
+  // 주문창·실행 버튼은 첫 인자가 종목 코드
+  if (['tb', 'tbm', 'ts', 'tf', 'tfl', 'to', 'toe', 'xb', 'xs', 'xf', 'xo'].includes(action) || (action === 'qi' && args[1])) {
+    if (!findAsset(action === 'qi' ? args[1] : args[0])) {
+      await show(ui.homeView(state, user, now, { error: true, text: '⚠️ 종목을 찾을 수 없어요.' }));
+      return false;
+    }
+  }
 
   switch (action) {
     case 'home':
@@ -116,29 +125,48 @@ async function handleComponent(interaction, { state }) {
       break;
     }
 
+    // 주문창: 버튼을 누를 때마다 미리보기를 다시 계산한다 (체결은 실행 버튼에서만)
+    case 'tb':
+      await show(tickets.buyTicket(state, user, args[0], args[1], args[2], now));
+      break;
+    case 'tbm':
+      await show(tickets.buyTicket(state, user, args[0], values[0], args[1], now));
+      break;
+    case 'ts':
+      await show(tickets.sellTicket(state, user, args[0], args[1], now));
+      break;
+    case 'tf':
+      await show(tickets.futuresTicket(state, user, args[0], args[1], args[2], args[3], now));
+      break;
+    case 'tfl':
+      await show(tickets.futuresTicket(state, user, args[0], args[1], values[0], args[2], now));
+      break;
+    case 'to':
+      await show(tickets.optionTicket(state, user, args[0], args[1], args[2], args[3], args[4], now));
+      break;
+    case 'toe':
+      await show(tickets.optionTicket(state, user, args[0], args[1], values[0], args[2], args[3], now));
+      break;
+    case 'xb':
+    case 'xs':
+    case 'xf':
+    case 'xo': {
+      const r = tickets.execute(state, user, gid, action, args, now);
+      changed = r.changed;
+      await show(r.view);
+      break;
+    }
+
     // 팝업 입력창 열기
+    case 'qi':
+      await interaction.showModal(tickets.inputModal(state, user, args[0], args.slice(1), now));
+      break;
     case 'search':
       await interaction.showModal(ui.searchModal());
       break;
     case 'repay':
       await interaction.showModal(ui.repayModal());
       break;
-    case 'buy':
-    case 'sell':
-    case 'fut':
-    case 'opt': {
-      const asset = findAsset(args[0]);
-      if (!asset) {
-        await show(ui.homeView(state, user, now, { error: true, text: '⚠️ 종목을 찾을 수 없어요.' }));
-        break;
-      }
-      const modal = action === 'buy' ? ui.buyModal(asset, state)
-        : action === 'sell' ? ui.sellModal(asset, state, user.id)
-          : action === 'fut' ? ui.futuresModal(asset, args[1])
-            : ui.optionModal(asset);
-      await interaction.showModal(modal);
-      break;
-    }
 
     // 채널에 공개로 올리기
     case 'share': {
@@ -179,13 +207,6 @@ async function handleModal(interaction, { state }) {
       return '';
     }
   };
-  const choice = (key, fallback) => {
-    try {
-      return f.getStringSelectValues(key)[0] || fallback;
-    } catch {
-      return fallback;
-    }
-  };
   // 버튼이 있던 화면에서 연 팝업이면 그 화면을 바꾸고, 아니면 나만 보이는 새 화면으로
   const show = (view) => (interaction.isFromMessage()
     ? interaction.update(view)
@@ -206,28 +227,13 @@ async function handleModal(interaction, { state }) {
     return r.changed;
   }
 
-  const asset = findAsset(args[0]);
-  if (!asset) {
-    await show(ui.homeView(state, user, now, { error: true, text: '⚠️ 종목을 찾을 수 없어요.' }));
+  if (action === 'mq') {
+    // 직접 입력한 수량·금액으로 주문창을 다시 보여 준다 (아직 체결하지 않음)
+    await show(tickets.fromInput(state, user, args[0], args.slice(1), text('v'), now));
     return false;
   }
-  const r = attempt(() => {
-    switch (action) {
-      case 'm_buy':
-        return ui.buyText(game.buy(state, user.id, gid, asset.id, text('qty'), choice('mode', 'cash'), now));
-      case 'm_sell':
-        return ui.sellText(game.sell(state, user.id, gid, asset.id, text('qty') || '전부', now));
-      case 'm_fut':
-        return ui.futText(game.openFuture(state, user.id, gid, asset.id, args[1], text('margin'), Number(choice('lev', '5')), now));
-      case 'm_opt':
-        return ui.optText(game.buyOption(state, user.id, gid, asset.id, choice('kind', 'call'), text('strike') || '현재가',
-          choice('expiry', '1d'), text('qty'), now));
-      default:
-        throw new game.GameError('알 수 없는 동작이에요.');
-    }
-  });
-  await show(ui.assetView(state, user, asset.id, '1d', now, r.notice));
-  return r.changed;
+  await show(ui.homeView(state, user, now));
+  return false;
 }
 
 // 자동완성: /주식 종목

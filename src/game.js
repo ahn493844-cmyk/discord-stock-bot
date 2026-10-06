@@ -268,14 +268,11 @@ function repay(state, userId, guildId, input = '전부') {
 
 const BUY_MODES = { cash: 1, credit: CREDIT_MARGIN, misu: MISU_MARGIN };
 
-function buy(state, userId, guildId, id, qtyInput, mode = 'cash', now = Date.now()) {
-  const asset = assetOrThrow(id);
+// 이 방식으로 지금 살 수 있는 최대 수량과 남은 대출 한도
+function buyLimits(state, user, asset, mode, now = Date.now()) {
   const m = BUY_MODES[mode];
-  if (m == null) throw new GameError('알 수 없는 매수 방식이에요.');
-  requireOpen(state, asset, now);
-  const user = getUser(state, userId, guildId, now);
-  const p = priceOrThrow(state, asset.id);
-
+  const p = marketPrice(state.market, asset.id);
+  if (m == null || p == null) return { max: 0, loanRoom: 0, price: p };
   let loanRoom = Infinity;
   if (mode !== 'cash') {
     const { total } = portfolioValue(state, user, now);
@@ -283,7 +280,21 @@ function buy(state, userId, guildId, id, qtyInput, mode = 'cash', now = Date.now
   }
   const maxByCash = user.cash / (p * (m + FEE_RATE));
   const maxByLoan = m < 1 ? loanRoom / ((1 - m) * p) : Infinity;
-  const max = roundQty(asset, Math.max(0, Math.min(maxByCash, maxByLoan)));
+  let max = roundQty(asset, Math.max(0, Math.min(maxByCash, maxByLoan)));
+  // 수수료 올림 때문에 한 단위 넘칠 수 있어 줄여 준다
+  const step = 1 / 10 ** (asset.decimals || 0);
+  while (max > 0 && max * p * (m + FEE_RATE) + 1 > user.cash) max = roundQty(asset, max - step);
+  return { max, loanRoom, price: p };
+}
+
+function buy(state, userId, guildId, id, qtyInput, mode = 'cash', now = Date.now()) {
+  const asset = assetOrThrow(id);
+  const m = BUY_MODES[mode];
+  if (m == null) throw new GameError('알 수 없는 매수 방식이에요.');
+  requireOpen(state, asset, now);
+  const user = getUser(state, userId, guildId, now);
+  const p = priceOrThrow(state, asset.id);
+  const { max, loanRoom } = buyLimits(state, user, asset, mode, now);
 
   const qty = parseQuantity(qtyInput, { max, asset, price: p });
   if (qty <= 0) throw new GameError('매수할 수 있는 수량이 없어요. 잔고나 대출 한도를 확인해 주세요.');
@@ -539,6 +550,39 @@ function processRisk(state, now = Date.now()) {
   return events;
 }
 
+// ── 미리보기 ─────────────────────────────────────────────────
+
+// 계좌 복사본으로 동작을 미리 실행해 본다. 실제 계좌는 바뀌지 않는다.
+// 반환: { result, before, after } 또는 { error }
+function simulate(state, userId, fn, now = Date.now()) {
+  const real = state.users[userId] ? ensureAccountFields(state.users[userId]) : newAccount(now);
+  const copy = structuredClone(real);
+  const sim = { market: state.market, users: { [userId]: copy }, guilds: {}, lastRiskAt: state.lastRiskAt };
+  try {
+    const result = fn(sim);
+    return {
+      result,
+      before: { account: real, value: portfolioValue(state, real, now) },
+      after: { account: sim.users[userId], value: portfolioValue(sim, sim.users[userId], now) },
+    };
+  } catch (err) {
+    if (err instanceof GameError) return { error: err.message };
+    throw err;
+  }
+}
+
+function maxFuturesMargin(user, leverage) {
+  return Math.max(0, Math.floor(user.cash / (1 + leverage * FUTURES_FEE_RATE)));
+}
+
+function maxOptionQty(user, asset, premium) {
+  if (!(premium > 0)) return 0;
+  let q = roundQty(asset, user.cash / (premium * (1 + FEE_RATE)));
+  const step = 1 / 10 ** (asset.decimals || 0);
+  while (q > 0 && q * premium + fee(q * premium) > user.cash) q = roundQty(asset, q - step);
+  return q;
+}
+
 // ── 기타 ─────────────────────────────────────────────────────
 
 function claimDaily(state, userId, guildId, now = Date.now()) {
@@ -573,9 +617,10 @@ function ranking(state, guildId = null, limit = 10, now = Date.now()) {
 module.exports = {
   START_CASH, FEE_RATE, FUTURES_FEE_RATE, DAILY_BONUS, BANKRUPT_LIMIT, CREDIT_MARGIN, CREDIT_RATE,
   MISU_MARGIN, MISU_DAYS, LOAN_LIMIT_RATIO, MAINTENANCE_RATIO, MAX_LEVERAGE, LIQUIDATION_LOSS,
-  OPTION_EXPIRIES, ASSETS,
+  OPTION_EXPIRIES, ASSETS, BUY_MODES,
   GameError, createState, normalizeState, getGuild, getUser, portfolioValue, loanTotal,
   futuresPnl, futuresEquity, liquidationPrice, optionValue,
   parseQuantity, parseAmount, parseStrike, parseWon, buy, sell, repay, openFuture, closeFuture,
   quoteOption, buyOption, sellOption, processRisk, claimDaily, bankrupt, ranking, won, fmtQty,
+  buyLimits, simulate, maxFuturesMargin, maxOptionQty, roundQty, fee,
 };
