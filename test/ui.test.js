@@ -98,6 +98,7 @@ function harness(state) {
   let screen = null;
   let modal = null;
   const shared = [];
+  const deleted = [];
   const base = (extra) => ({
     user, guildId: 'g1', replied: false, deferred: false,
     reply: async (m) => {
@@ -106,6 +107,7 @@ function harness(state) {
     },
     update: async (m) => { screen = m; },
     deferUpdate: async () => {},
+    deleteReply: async () => { deleted.push(extra && extra.customId); },
     showModal: async (m) => { modal = m; },
     isStringSelectMenu: () => false,
     isFromMessage: () => true,
@@ -115,6 +117,8 @@ function harness(state) {
     get screen() { return screen; },
     get modal() { return modal; },
     shared,
+    deleted,
+    asUser(u) { Object.assign(user, u); },
     async command(target, commandName = '주식') {
       await handleCommand(base({ commandName, options: { getString: () => target ?? null } }), { state });
       return checkMessage(screen, `/주식 ${target || ''}`);
@@ -513,4 +517,19 @@ test('명령어는 서버 설치와 내 계정 설치 둘 다 지원하고, 서�
     assert.deepStrictEqual(d.integration_types, [0, 1], d.name);
     assert.deepStrictEqual(d.contexts, [0], d.name);
   }
+});
+
+test('채널에 공유한 메시지는 공유한 사람만 삭제 버튼으로 지울 수 있다', async () => {
+  const state = makeState();
+  const h = harness(state);
+  await h.command();
+  await h.click('stk|share|a|005930|1d');
+  const shared = checkMessage(h.shared[0], '공유 메시지');
+  assert.ok(shared.ids.has('stk|del|u1'), '공유 메시지에 삭제 버튼');
+  await h.click('stk|del|u1');
+  assert.deepStrictEqual(h.deleted, ['stk|del|u1']);
+  // 다른 사람이 누르면 안내만 (나만 보이게)
+  await h.click('stk|del|someone-else');
+  assert.strictEqual(h.deleted.length, 1);
+  assert.match(h.notice(), /공유한 사람만/);
 });
