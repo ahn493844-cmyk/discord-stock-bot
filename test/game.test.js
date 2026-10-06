@@ -45,15 +45,16 @@ test('전부 매수는 잔고를 넘지 않는다', () => {
   assert.ok(b.cash >= 0 && b.cash < 70000 * 1.0015);
 });
 
-test('장이 닫혀 있거나 시세가 없으면 거래할 수 없다', () => {
+test('장이 닫혀 있어도 마지막 종가로 24시간 거래되고, 시세가 없을 때만 막힌다', () => {
   const s = fresh();
   setPrice(s, '005930', 70000, { period: { start: NOW + 3600e3, end: NOW + 7200e3 } });
   assert.ok(!isOpen(s.market, '005930', NOW));
-  assert.throws(() => game.buy(s, 'u', 'g', '005930', '1', 'cash', NOW), /장 마감/);
+  const b = game.buy(s, 'u', 'g', '005930', '1', 'cash', NOW);
+  assert.strictEqual(b.price, 70000);
+  setPrice(s, 'AAPL', 300000, { now: NOW - 10 * 3600e3 }); // 10시간 전 종가
+  assert.strictEqual(game.sell(s, 'u', 'g', '005930', '1', NOW).price, 70000);
+  game.openFuture(s, 'u', 'g', 'AAPL', 'short', '5만', 2, NOW);
   assert.throws(() => game.buy(s, 'u', 'g', 'TSLA', '1', 'cash', NOW), /시세/);
-  // 오래된 시세도 거래 불가
-  setPrice(s, 'AAPL', 300000, { now: NOW - 60 * 60e3 });
-  assert.throws(() => game.buy(s, 'u', 'g', 'AAPL', '1', 'cash', NOW), /장 마감/);
 });
 
 test('신용매수는 절반만 내고 나머지는 대출, 매도하면 자동 상환', () => {

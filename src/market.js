@@ -3,7 +3,7 @@
 const { ASSETS, findAsset } = require('./assets');
 
 const HISTORY_LEN = 120;              // 차트용 기록 개수 (틱 단위)
-const STALE_MS = 15 * 60 * 1000;      // 이보다 오래된 시세로는 거래 불가
+const STALE_MS = 15 * 60 * 1000;      // 이보다 오래된 시세는 '장 마감'으로 표시
 const CRYPTO_STALE_MS = 5 * 60 * 1000;
 
 function kstDayKey(now) {
@@ -17,11 +17,14 @@ function emptyQuote() {
 function createMarket(now = Date.now()) {
   const assets = {};
   for (const a of ASSETS) assets[a.id] = emptyQuote();
-  return { version: 3, assets, usdKrw: null, lastTick: now, lastYahoo: 0 };
+  return { version: 3, assets, fx: {}, lastTick: now };
 }
 
 // 저장된 시장에 새로 추가된 상품을 채우고, 빠진 상품은 지운다
 function syncMarket(market) {
+  market.fx = market.fx || (market.usdKrw ? { USD: market.usdKrw } : {});
+  delete market.usdKrw;
+  delete market.lastYahoo;
   for (const a of ASSETS) if (!market.assets[a.id]) market.assets[a.id] = emptyQuote();
   for (const id of Object.keys(market.assets)) if (!findAsset(id)) delete market.assets[id];
   return market;
@@ -36,7 +39,7 @@ function price(market, id) {
   return q ? q.price : null;
 }
 
-// 지금 이 상품을 거래할 수 있는지 (장 운영 시간 + 시세 신선도)
+// 실제 거래소가 지금 열려 있는지 (표시용 — 게임 거래는 24시간 가능)
 function isOpen(market, id, now = Date.now()) {
   const a = findAsset(id);
   const q = quote(market, id);
@@ -50,7 +53,7 @@ function isOpen(market, id, now = Date.now()) {
 function marketStatus(market, id, now = Date.now()) {
   const q = quote(market, id);
   if (!q || q.price == null) return '시세 준비 중';
-  return isOpen(market, id, now) ? '거래 중' : '장 마감';
+  return isOpen(market, id, now) ? '실시간' : '장 마감 (종가 기준)';
 }
 
 // 틱마다 차트 기록을 남긴다

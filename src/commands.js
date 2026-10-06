@@ -5,7 +5,7 @@ const {
 } = require('discord.js');
 const game = require('./game');
 const { ASSETS, CATEGORIES, findAsset, searchAssets, unitOf } = require('./assets');
-const { quote, marketStatus } = require('./market');
+const { quote, marketStatus, isOpen } = require('./market');
 
 const { won, fmtQty } = game;
 const COLOR_UP = 0xe03131;   // 한국 증시 관례: 상승 빨강
@@ -106,33 +106,62 @@ function rawPrice(asset, q) {
   return null;
 }
 
-function marketEmbed(state, category, now) {
-  const cats = category ? [category] : Object.keys(CATEGORIES);
-  const e = new EmbedBuilder().setTitle('📈 실시간 시세').setColor(COLOR_INFO);
-  for (const c of cats) {
-    const lines = ASSETS.filter((a) => a.category === c).map((a) => {
-      const q = quote(state.market, a.id);
-      if (q.price == null) return `**${a.name}** · 시세 준비 중`;
-      const closed = marketStatus(state.market, a.id, now) !== '거래 중' ? ' 💤' : '';
-      return `**${a.name}** ${won(q.price)} ${q.prevClose ? fmtPct(pct(q.prevClose, q.price)) : ''}${closed}`;
-    });
-    e.addFields({ name: CATEGORIES[c], value: clip(lines.join('\n')) });
+function priceLine(state, a, now) {
+  const q = quote(state.market, a.id);
+  if (q.price == null) return `**${a.name}** · 시세 준비 중`;
+  const closed = isOpen(state.market, a.id, now) ? '' : ' 💤';
+  return `**${a.name}** ${won(q.price)} ${q.prevClose ? fmtPct(pct(q.prevClose, q.price)) : ''}${closed}`;
+}
+
+// 줄 목록을 1024자 이하 필드 여러 개로 나눈다
+function chunkFields(lines) {
+  const fields = [];
+  let cur = [];
+  for (const line of lines) {
+    if (cur.length && [...cur, line].join('\n').length > 1024) {
+      fields.push(cur);
+      cur = [];
+    }
+    cur.push(line);
   }
-  const fx = state.market.usdKrw ? ` · 환율 $1 = ${won(state.market.usdKrw)}` : '';
-  return e.setFooter({ text: `등락률은 전일 종가 대비 · 💤 장 마감${fx}` }).setTimestamp(now);
+  if (cur.length) fields.push(cur);
+  return fields.map((f) => ({ name: '​', value: f.join('\n') }));
+}
+
+const OVERVIEW_PER_CATEGORY = 5;
+
+function marketEmbed(state, category, now) {
+  const e = new EmbedBuilder().setColor(COLOR_INFO);
+  if (category) {
+    const list = ASSETS.filter((a) => a.category === category);
+    e.setTitle(`📈 ${CATEGORIES[category]} 시세 (${list.length}종목)`)
+      .addFields(chunkFields(list.map((a) => priceLine(state, a, now))));
+  } else {
+    e.setTitle('📈 실시간 시세 — 주요 종목')
+      .setDescription('전체 목록은 `/시세 분류:` 에서 분류를 골라 보세요.');
+    for (const [c, label] of Object.entries(CATEGORIES)) {
+      const list = ASSETS.filter((a) => a.category === c);
+      const lines = list.slice(0, OVERVIEW_PER_CATEGORY).map((a) => priceLine(state, a, now));
+      if (list.length > OVERVIEW_PER_CATEGORY) lines.push(`…외 ${list.length - OVERVIEW_PER_CATEGORY}종목`);
+      e.addFields({ name: `${label} (${list.length})`, value: clip(lines.join('\n')) });
+    }
+  }
+  const fx = state.market.fx?.USD ? ` · $1 = ${won(state.market.fx.USD)}` : '';
+  return e.setFooter({ text: `전일 종가 대비 · 💤 장 마감(종가로 24시간 거래 가능)${fx}` }).setTimestamp(now);
 }
 
 function chartEmbed(state, asset, now) {
   const q = quote(state.market, asset.id);
   const hist = q.history.slice(-60);
-  const change = q.prevClose ? pct(q.prevClose, q.price) : 0;
+  const hasChange = q.prevClose && q.price != null;
+  const change = hasChange ? pct(q.prevClose, q.price) : 0;
   const e = new EmbedBuilder()
     .setTitle(`${asset.name} (${asset.id}) · ${CATEGORIES[asset.category]}`)
     .setColor(change >= 0 ? COLOR_UP : COLOR_DOWN)
     .setDescription(hist.length >= 2 ? `\`\`\`\n${sparkline(hist)}\n\`\`\`` : '차트 데이터를 모으는 중이에요. 잠시 후 다시 확인해 주세요.')
     .addFields(
       { name: '현재가', value: q.price == null ? '시세 준비 중' : won(q.price), inline: true },
-      { name: '전일 대비', value: q.prevClose ? fmtPct(change) : '-', inline: true },
+      { name: '전일 대비', value: hasChange ? fmtPct(change) : '-', inline: true },
       { name: '상태', value: marketStatus(state.market, asset.id, now), inline: true },
     );
   const raw = rawPrice(asset, q);
@@ -228,8 +257,9 @@ function helpEmbed() {
     .setColor(COLOR_INFO)
     .setDescription(
       `처음 명령어를 쓰면 **${won(game.START_CASH)}**으로 계좌가 열려요. 계좌는 봇이 있는 **모든 서버에서 공용**이에요.\n` +
-      '시세는 **실제 시장 가격**(한국·미국 주식, 코인, ETF, 금, 환율)이고, 미국 상품은 원화로 환산돼요.\n' +
-      '장이 닫힌 상품(💤)은 거래할 수 없어요. 코인은 24시간 거래돼요.\n​')
+      '시세는 **실제 시장 가격**(한국·미국 주식, ETF, 선물·원자재, 코인, 금, 환율)이고, 해외 상품은 원화로 환산돼요.\n' +
+      '**24시간 거래 가능!** 장이 닫힌 상품(💤)은 마지막 종가로 거래돼요.\n' +
+      `종목은 ${ASSETS.length}개 — 이름 일부를 입력하면 자동완성으로 골라요.\n​`)
     .addFields(
       { name: '📈 시세', value: '`/시세 [분류]` · `/차트 종목`' },
       { name: '🛒 현물', value: '`/매수 종목 수량 [방식]` · `/매도 종목 수량`\n수량: `10`, `0.01`, `전부`, `절반`, `30%`, `10만원`' },

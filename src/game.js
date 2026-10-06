@@ -2,7 +2,7 @@
 // 디스코드와 무관한 순수 로직
 
 const { ASSETS, findAsset, unitOf } = require('./assets');
-const { createMarket, syncMarket, price: marketPrice, isOpen, kstDayKey } = require('./market');
+const { createMarket, syncMarket, price: marketPrice, kstDayKey } = require('./market');
 const { optionPrice, intrinsic, YEAR_MS } = require('./options');
 
 const START_CASH = 1_000_000;
@@ -133,16 +133,9 @@ function priceOrThrow(state, id) {
   return p;
 }
 
-function requireOpen(state, asset, now) {
+// 24시간 거래: 시세만 있으면 거래 가능. 장이 닫힌 상품은 마지막 종가로 체결된다
+function requireOpen(state, asset) {
   priceOrThrow(state, asset.id);
-  if (!isOpen(state.market, asset.id, now)) {
-    const hint = asset.category === 'kr' || asset.id === '069500' || asset.id === '122630'
-      ? '한국 장은 평일 09:00~15:30에 열려요.'
-      : asset.category === 'us' || asset.id === 'SPY' || asset.id === 'QQQ'
-        ? '미국 장은 한국 시간 밤(서머타임 22:30~05:00, 그 외 23:30~06:00)에 열려요.'
-        : '잠시 후 다시 시도해 주세요.';
-    throw new GameError(`**${asset.name}**은(는) 지금 거래할 수 없어요 (장 마감). ${hint}`);
-  }
 }
 
 function roundQty(asset, q) {
