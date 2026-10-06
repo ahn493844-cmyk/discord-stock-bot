@@ -317,7 +317,9 @@ test('검색·출석·랭킹·도움말·공유', async () => {
   await h.command();
   await h.click('stk|search');
   const many = await h.submit('stk|m_search', { q: '삼성' });
-  assert.ok(many.rows[0].components[0].options.length > 1);
+  assert.ok([...many.ids].filter((x) => x.startsWith('stk|a|') && x.endsWith('|s')).length > 1, '검색 결과 줄마다 버튼');
+  await h.click('stk|a|005930|1d|s');
+  assert.match(fieldsText(h.screen), /삼성전자/);
   await h.submit('stk|m_search', { q: 'AAPL' });
   assert.match(fieldsText(h.screen), /애플/);
   await h.submit('stk|m_search', { q: '없는종목zzz' });
@@ -365,17 +367,65 @@ test('선물·옵션 → 포지션에서 선택·확인으로 정리 → 대출 
   await h.click('stk|xo|005930|call|1w|5|10');
   await h.click('stk|xb|005930|credit|5');
   const pos = await h.click('stk|pos');
-  const select = pos.rows[0].components[0];
-  assert.strictEqual(select.options.length, 2);
-  const confirm = await h.pick('stk|close', select.options[0].value);
-  assert.ok([...confirm.ids].some((x) => x.startsWith('stk|closeok|')));
-  await h.click(`stk|closeok|${select.options[0].value}`);
+  const closeBtns = [...pos.ids].filter((x) => x.startsWith('stk|closeb|'));
+  assert.strictEqual(closeBtns.length, 2, '포지션 줄마다 정리 버튼');
+  assert.match(pos.text, /담보비율/);
+  const confirm = await h.click(closeBtns[0]);
+  assert.match(confirm.text, /청산 확인/);
+  const ok = [...confirm.ids].find((x) => x.startsWith('stk|closeok|'));
+  await h.click(ok);
   assert.match(h.notice(), /청산/);
-  await h.click(`stk|closeok|${select.options[1].value}`);
+  await h.click('stk|closeb|' + closeBtns[1].split('|')[2]);
+  await h.click('stk|closeok|' + closeBtns[1].split('|')[2]);
   assert.match(h.notice(), /옵션 .* 매도/);
   await h.click('stk|repay');
   await h.submit('stk|m_repay', { amount: '전부' });
   assert.match(h.notice(), /상환/);
   const u = game.getUser(state, 'u1');
   assert.strictEqual(u.futures.length + u.options.length + u.loans.length, 0);
+});
+
+test('누를 수 있는 UI: 홈 시장 버튼·목록 줄 버튼·랭킹에서 남의 자산·도움말 바로가기', async () => {
+  const state = makeState();
+  const h = harness(state);
+  const home = await h.command();
+  const heat = [...home.ids].filter((x) => x.startsWith('stk|a|') && x.endsWith('|h'));
+  assert.ok(heat.length >= 10, '홈 시장 종목 버튼');
+  await h.click(heat[0]);
+  assert.match(fieldsText(h.screen), /원/);
+
+  const list = await h.click('stk|list|kr|0');
+  const rowsBtns = [...list.ids].filter((x) => x.endsWith('|l'));
+  assert.strictEqual(rowsBtns.length, 8);
+  await h.click('stk|list|kr|6');
+
+  // 다른 사람 계좌 만들고 랭킹 → 그 사람 자산 (보기 전용)
+  game.getUser(state, 'u2', 'g1').cash = 2_000_000;
+  game.buy(state, 'u2', 'g1', 'AAPL', '1', 'cash');
+  const rank = await h.click('stk|rank|all');
+  assert.match(rank.text, /내 순위/);
+  assert.ok(rank.ids.has('stk|pfu|u2'));
+  const other = await h.click('stk|pfu|u2');
+  assert.match(other.text, /<@u2>님의 자산/);
+  assert.ok(!other.ids.has('stk|share|pf'), '남의 자산 화면엔 공유·파산 버튼 없음');
+  assert.ok(other.ids.has('stk|a|AAPL|1d|pf'));
+  await h.click('stk|pfu|nobody');
+  assert.match(h.notice(), /찾을 수 없어요/);
+
+  const help = await h.click('stk|help');
+  assert.ok(help.ids.has('stk|list|kr|0'));
+});
+
+test('포지션이 많아도 제한을 지키고 나머지는 메뉴로', async () => {
+  const state = makeState();
+  const h = harness(state);
+  game.getUser(state, 'u1', 'g1').cash = 1e9;
+  for (let i = 0; i < 20; i++) game.openFuture(state, 'u1', 'g1', 'BTC', i % 2 ? 'long' : 'short', '1만', 2);
+  for (let i = 0; i < 20; i++) game.buyOption(state, 'u1', 'g1', 'BTC', 'call', '현재가', '1w', '0.001');
+  game.buy(state, 'u1', 'g1', 'BTC', '0.01', 'misu');
+  for (const a of ASSETS.slice(0, 40)) game.buy(state, 'u1', 'g1', a.id, a.decimals ? '0.01' : '1', 'cash');
+  const pos = await h.click('stk|pos');
+  assert.ok(pos.ids.has('stk|close'));
+  await h.click('stk|pf');
+  await h.click('stk|rank|all');
 });

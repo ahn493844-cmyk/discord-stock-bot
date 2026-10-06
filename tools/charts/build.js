@@ -8,9 +8,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { ASSETS, CATEGORIES, BOARD_PAGE_SIZE, HOME_HEATMAP, findAsset } = require('../../src/assets');
-const { toKrw } = require('../../src/prices');
-const { renderChart, renderIcon, renderBoard, renderHeatmap } = require('./render');
+const { ASSETS } = require('../../src/assets');
+const { renderChart, renderIcon } = require('./render');
 
 const OUT = path.join(__dirname, 'site');
 const CACHE = path.join(__dirname, '.cache');
@@ -56,12 +55,17 @@ async function yahooChart(ticker, range, interval) {
   throw lastErr;
 }
 
-// 직전 거래일 종가: 이번 거래 세션 시작 전 마지막 봉
+// 직전 거래일 종가: 마지막 봉이 속한 날(거래소 현지 날짜) 바로 전 거래일의 마지막 봉.
+// 장 중이든 장 마감 후든 "그날 등락"이 나온다. (거래 세션 기준으로 자르면 장 마감 후에
+// 다음 세션이 기준이 되어 오늘 종가를 전일 종가로 잡아 0.00%가 되는 문제가 있었다)
 function previousClose(meta, points) {
-  const reg = meta.currentTradingPeriod && meta.currentTradingPeriod.regular;
-  if (reg && reg.start) {
-    const before = points.filter((p) => p.t < reg.start * 1000);
-    if (before.length) return before[before.length - 1].c;
+  if (points.length) {
+    const offset = (meta.gmtoffset || 0) * 1000;
+    const day = (t) => new Date(t + offset).toISOString().slice(0, 10);
+    const lastDay = day(points[points.length - 1].t);
+    for (let i = points.length - 1; i >= 0; i--) {
+      if (day(points[i].t) !== lastDay) return points[i].c;
+    }
   }
   return meta.previousClose ?? meta.chartPreviousClose ?? null;
 }
@@ -183,7 +187,6 @@ async function main() {
 
   const targets = ASSETS;
   const SAMPLE_CHARTS = new Set(['005930', 'AAPL', 'BTC', 'CL', 'N225', 'GOLD']);
-  const sparks = {};
   const quotes = {};
   const errors = [];
   let charts = 0;
@@ -200,7 +203,6 @@ async function main() {
       try {
         const r = SAMPLE ? await collectSample(asset, now, i) : await collect(asset, now);
         if (r.quote && r.quote.raw > 0) quotes[asset.id] = r.quote;
-        sparks[asset.id] = (r.series['1d'] || []).map((p) => p.c);
         if (SAMPLE && !SAMPLE_CHARTS.has(asset.id)) continue;
         for (const [range, pts] of Object.entries(r.series)) {
           const png = renderChart({
@@ -222,33 +224,12 @@ async function main() {
   if (quotes.USD) fx.USD = quotes.USD.raw;
   if (quotes.JPY) fx.JPY = quotes.JPY.raw;
 
-  // 아이콘·시세판·히트맵
-  const stamp = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-  const view = (a) => {
-    const q = quotes[a.id];
-    const price = q ? toKrw(a, q.raw, fx) : null;
-    const change = q && q.prevCloseRaw ? ((q.raw - q.prevCloseRaw) / q.prevCloseRaw) * 100 : null;
-    return { asset: a, price, change, spark: sparks[a.id] };
-  };
+  // 종목 아이콘
   let extras = 0;
   for (const a of targets) {
     fs.writeFileSync(path.join(OUT, 'charts', `icon_${a.id}.png`), renderIcon(a));
     extras++;
   }
-  for (const [cat, label] of Object.entries(CATEGORIES)) {
-    const list = targets.filter((a) => a.category === cat);
-    const pages = Math.ceil(list.length / BOARD_PAGE_SIZE);
-    for (let p = 0; p < pages; p++) {
-      const rows = list.slice(p * BOARD_PAGE_SIZE, (p + 1) * BOARD_PAGE_SIZE).map(view);
-      fs.writeFileSync(path.join(OUT, 'charts', `board_${cat}_${p}.png`),
-        renderBoard(`${label}${pages > 1 ? ` (${p + 1}/${pages})` : ''}`, rows, `전일 종가 대비 · 원화 환산 · ${stamp} 기준`));
-      extras++;
-    }
-  }
-  const heat = HOME_HEATMAP.map(findAsset).filter(Boolean).map(view);
-  fs.writeFileSync(path.join(OUT, 'charts', 'heat_home.png'), renderHeatmap('오늘의 시장', heat, 5, `전일 종가 대비 · ${stamp} 기준`));
-  extras++;
-
   const generatedAt = Date.now();
   fs.writeFileSync(path.join(OUT, 'data', 'quotes.json'), JSON.stringify({ generatedAt, fx, quotes }));
   fs.writeFileSync(path.join(OUT, 'index.html'), `<!doctype html><meta charset="utf-8"><title>주식봇 시세</title>

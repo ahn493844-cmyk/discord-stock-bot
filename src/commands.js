@@ -88,6 +88,19 @@ async function handleComponent(interaction, { state }) {
     case 'close':
       await show(ui.positionsView(state, user, now, null, values[0]));
       break;
+    case 'closeb':
+      await show(ui.positionsView(state, user, now, null, args[0]));
+      break;
+    case 'pfu': {
+      // 랭킹에서 다른 사람 자산 보기 (보기만 가능)
+      const target = args[0] === user.id ? user : { id: args[0] };
+      if (!state.users[args[0]]) {
+        await show(ui.rankingView(state, 'all', gid, now, { error: true, text: '⚠️ 계좌를 찾을 수 없어요.' }, user.id));
+        break;
+      }
+      await show(ui.portfolioView(state, target, now, null, user.id));
+      break;
+    }
     case 'closeok': {
       const [kind, pid] = String(args[0]).split(':');
       const r = attempt(() => {
@@ -103,7 +116,7 @@ async function handleComponent(interaction, { state }) {
       break;
     }
     case 'rank':
-      await show(ui.rankingView(state, args[0], gid, now));
+      await show(ui.rankingView(state, args[0], gid, now, null, user.id));
       break;
     case 'help':
       await show(ui.helpView());

@@ -8,7 +8,7 @@ const {
   ModalBuilder, LabelBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 const game = require('./game');
-const { ASSETS, CATEGORIES, findAsset, unitOf, BOARD_PAGE_SIZE, HOME_HEATMAP } = require('./assets');
+const { ASSETS, CATEGORIES, findAsset, unitOf, HOME_HEATMAP } = require('./assets');
 const v2 = require('./v2');
 const { quote, isOpen, marketStatus } = require('./market');
 const { PAGES_URL } = require('./prices');
@@ -19,7 +19,7 @@ const COLOR_DOWN = 0x1c7ed6; // 하락 파랑
 const COLOR_INFO = 0xf59f00;
 const COLOR_OK = 0x2f9e44;
 const COLOR_ERR = 0xc92a2a;
-const PAGE_SIZE = BOARD_PAGE_SIZE;
+const PAGE_SIZE = 8; // 목록 한 페이지 종목 수 (줄마다 버튼이 있어 디스코드 요소 수 제한 40개에 맞춤)
 const RANGES = { '1d': '1일', '1w': '1주', '1m': '1달', '1y': '1년' };
 
 const id = (...parts) => ['stk', ...parts].join('|');
@@ -108,14 +108,44 @@ function categorySelect(selected) {
 
 // ── 홈 ───────────────────────────────────────────────────────
 
+// 등락률 → 버튼 색 (한국 증시 관례: 상승 빨강, 하락 파랑, 보합 회색)
+function changeStyle(ch) {
+  if (ch == null || Math.abs(ch) < 0.005) return ButtonStyle.Secondary;
+  return ch > 0 ? ButtonStyle.Danger : ButtonStyle.Primary;
+}
+
+function changeLabel(ch) {
+  if (ch == null) return '-';
+  return `${ch > 0 ? '▲' : ch < 0 ? '▼' : ''} ${Math.abs(ch).toFixed(2)}%`.trim();
+}
+
+// 누를 수 있는 히트맵: 종목 버튼을 5개씩 줄로
+function heatmapRows(state, ids, key) {
+  const assets = ids.map(findAsset).filter(Boolean);
+  const rows = [];
+  for (let i = 0; i < assets.length; i += 5) {
+    rows.push(row(...assets.slice(i, i + 5).map((a) => {
+      const ch = changeOf(state, a.id);
+      return btn(id('a', a.id, '1d', key), clipLabel(`${a.name.replace(/ \(.*\)$/, '')} ${changeLabel(ch)}`, 80), changeStyle(ch));
+    })));
+  }
+  return rows;
+}
+
+// 종목 한 줄 = 이름·가격 + 오른쪽에 누를 수 있는 등락률 버튼
+function assetRow(state, a, now, key) {
+  const q = quote(state.market, a.id);
+  const ch = changeOf(state, a.id);
+  const price = q && q.price != null ? won(q.price) : '시세 준비 중';
+  const closed = q && q.price != null && !isOpen(state.market, a.id, now) ? ' 💤' : '';
+  return v2.section(`**${a.name}**　${price}${closed}\n-# ${a.id} · ${CATEGORIES[a.category]}`,
+    { button: btn(id('a', a.id, '1d', key), changeLabel(ch), changeStyle(ch)) });
+}
+
 function homeView(state, user, now, notice) {
   const acc = game.getUser(state, user.id, null, now);
   const v = game.portfolioValue(state, acc, now);
   const profit = v.total - game.START_CASH;
-  const heat = v2.pagesImage(state, 'heat_home');
-  const market = heat
-    ? v2.gallery(heat)
-    : v2.text(HOME_HEATMAP.slice(0, 6).map(findAsset).filter(Boolean).map((a) => priceLine(state, a, now)).join('\n') || '시세 준비 중');
   return {
     v2: [
       v2.noticeContainer(notice),
@@ -128,7 +158,8 @@ function homeView(state, user, now, notice) {
         ),
         v2.text(`💰 현금 **${won(v.cash)}**　📊 투자 **${won(v.stock + v.futures + v.options)}**　💳 대출 **${won(v.loans)}**`),
         v2.sep(),
-        market,
+        v2.text('### 🌐 오늘의 시장\n-# 종목을 누르면 차트·주문 화면으로 가요'),
+        ...heatmapRows(state, HOME_HEATMAP, 'h'),
         row(categorySelect()),
         row(
           btn(id('search'), '종목 검색', ButtonStyle.Primary, { emoji: '🔍' }),
@@ -154,26 +185,14 @@ function listView(state, cat, page, now, notice) {
   const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
   const p = Math.min(Math.max(0, Number(page) || 0), pages - 1);
   const items = list.slice(p * PAGE_SIZE, (p + 1) * PAGE_SIZE);
-  const board = v2.pagesImage(state, `board_${cat}_${p}`);
-  const pick = new StringSelectMenuBuilder()
-    .setCustomId(id('pick', cat))
-    .setPlaceholder('📈 종목 선택 → 차트·주문')
-    .addOptions(items.map((a) => {
-      const q = quote(state.market, a.id);
-      const ch = changeOf(state, a.id);
-      return {
-        label: clipLabel(a.name),
-        value: a.id,
-        description: clipLabel(q && q.price != null ? `${won(q.price)}${ch != null ? ` (${ch >= 0 ? '+' : ''}${ch.toFixed(2)}%)` : ''} · ${a.id}` : `시세 준비 중 · ${a.id}`),
-      };
-    }));
+  // 종목 한 줄 = 이름·가격 + 오른쪽에 누를 수 있는 등락률 버튼
+  const rows = items.map((a) => assetRow(state, a, now, 'l'));
   return {
     v2: [
       v2.noticeContainer(notice),
       v2.container(COLOR_INFO, [
-        v2.text(`## 📂 ${CATEGORIES[cat]}\n-# ${list.length}종목 · ${p + 1}/${pages} 페이지`),
-        board ? v2.gallery(board) : v2.text(clip(items.map((a) => priceLine(state, a, now)).join('\n'), 3000)),
-        row(pick),
+        v2.text(`## 📂 ${CATEGORIES[cat]}\n-# ${list.length}종목 · ${p + 1}/${pages} 페이지 · 오른쪽 버튼을 누르면 차트·주문 화면`),
+        ...rows,
         row(categorySelect(cat)),
         row(
           btn(id('list', cat, p - 1), '이전', ButtonStyle.Secondary, { emoji: '◀️', disabled: p === 0 }),
@@ -182,7 +201,6 @@ function listView(state, cat, page, now, notice) {
           btn(id('search'), '검색', ButtonStyle.Primary, { emoji: '🔍' }),
           homeBtn(),
         ),
-        v2.text(`-# ${board ? '시세판은 15분마다 갱신 · ' : ''}메뉴에서 종목을 고르면 차트와 주문 화면이 열려요`),
       ]),
     ],
   };
@@ -319,8 +337,10 @@ function portfolioEmbed(state, user, now) {
     );
 }
 
-function portfolioView(state, user, now, notice) {
-  const acc = game.getUser(state, user.id, null, now);
+// target: 볼 사람 ({ id, displayName?, displayAvatarURL? }), viewerId: 보는 사람
+function portfolioView(state, target, now, notice, viewerId = target.id) {
+  const mine = target.id === viewerId;
+  const acc = game.getUser(state, target.id, null, now);
   const v = game.portfolioValue(state, acc, now);
   const profit = v.total - game.START_CASH;
   const gross = Math.max(1, v.cash + v.stock + v.futures + v.options);
@@ -337,43 +357,48 @@ function portfolioView(state, user, now, notice) {
       return { hid, a, h, p, value: h.qty * p };
     })
     .sort((x, y) => y.value - x.value);
-  const shown = holdings.slice(0, 5);
-  const rows = shown.map(({ hid, a, h, p, value }) => v2.section(
-    `**${a ? a.name : hid}** ${fmtQty(a, h.qty)} · ${won(value)}\n` +
-    `-# 평단 ${won(h.avgPrice)} · ${fmtPct(pct(h.avgPrice, p))} (${signedWon((p - h.avgPrice) * h.qty)})`,
-    { button: btn(id('a', hid, '1d', 'pf'), '보기', ButtonStyle.Secondary, { emoji: '📈' }) },
-  ));
-  const rest = holdings.slice(5, 30);
-  const buttons = [
-    btn(id('pos'), '포지션', ButtonStyle.Secondary, { emoji: '📋' }),
-    btn(id('rank', 'all'), '랭킹', ButtonStyle.Secondary, { emoji: '🏆' }),
-    homeBtn(),
-    btn(id('share', 'pf'), '채널에 공유', ButtonStyle.Success, { emoji: '📢' }),
-  ];
-  if (v.total < game.BANKRUPT_LIMIT) buttons.push(btn(id('bankrupt'), '파산 신청', ButtonStyle.Danger, { emoji: '💀' }));
+  const SHOW = 6;
+  const rows = holdings.slice(0, SHOW).map(({ hid, a, h, p, value }) => {
+    const ch = pct(h.avgPrice, p);
+    return v2.section(
+      `**${a ? a.name : hid}**　${won(value)}\n-# ${fmtQty(a, h.qty)} · 평단 ${won(h.avgPrice)} · ${signedWon((p - h.avgPrice) * h.qty)}`,
+      { button: btn(id('a', hid, '1d', 'pf'), changeLabel(ch), changeStyle(ch)) },
+    );
+  });
+  const rest = holdings.slice(SHOW, SHOW + 25);
+  const name = mine ? `${target.displayName ?? target.username}님` : `<@${target.id}>님`;
+  const avatar = typeof target.displayAvatarURL === 'function' ? target.displayAvatarURL() : null;
+  const header = `-# 💼 ${name}의 자산\n# ${won(v.total)}\n` +
+    `${fmtPct(pct(game.START_CASH, v.total))} (${signedWon(profit)}) · 실현 손익 ${signedWon(acc.realized)}`;
+
+  const buttons = mine
+    ? [
+      btn(id('pos'), '포지션', ButtonStyle.Secondary, { emoji: '📋' }),
+      btn(id('rank', 'all'), '랭킹', ButtonStyle.Secondary, { emoji: '🏆' }),
+      homeBtn(),
+      btn(id('share', 'pf'), '채널에 공유', ButtonStyle.Success, { emoji: '📢' }),
+    ]
+    : [btn(id('rank', 'all'), '랭킹으로', ButtonStyle.Secondary, { emoji: '⬅️' }), homeBtn()];
+  if (mine && v.total < game.BANKRUPT_LIMIT) buttons.push(btn(id('bankrupt'), '파산 신청', ButtonStyle.Danger, { emoji: '💀' }));
 
   return {
     v2: [
       v2.noticeContainer(notice),
       v2.container(profit >= 0 ? COLOR_UP : COLOR_DOWN, [
-        v2.section(
-          `-# 💼 ${user.displayName ?? user.username}님의 자산\n# ${won(v.total)}\n` +
-          `${fmtPct(pct(game.START_CASH, v.total))} (${signedWon(profit)}) · 실현 손익 ${signedWon(acc.realized)}`,
-          { thumbnail: user.displayAvatarURL() },
-        ),
+        avatar ? v2.section(header, { thumbnail: avatar }) : v2.text(header),
         v2.sep(),
         v2.text(`### 자산 구성\n${mix.join('\n')}`),
         v2.sep(),
-        v2.text(`### 보유 종목 (${holdings.length})${holdings.length ? '' : '\n-# 아직 없어요. 홈에서 종목을 골라 매수해 보세요!'}`),
+        v2.text(`### 보유 종목 (${holdings.length})\n-# ${holdings.length ? '오른쪽 버튼(평단 대비 수익률)을 누르면 차트·매도 화면' : '아직 없어요. 홈에서 종목을 골라 매수해 보세요!'}`),
         ...rows,
         rest.length ? row(new StringSelectMenuBuilder()
           .setCustomId(id('pick', 'pf'))
           .setPlaceholder(`나머지 ${rest.length}종목 보기`)
           .addOptions(rest.map(({ hid, a, h }) => ({ label: clipLabel(a ? a.name : hid), value: hid, description: fmtQty(a, h.qty) })))) : null,
-        v2.sep(),
         row(...buttons),
       ]),
     ],
+    allowedMentions: { parse: [] },
   };
 }
 
@@ -404,48 +429,76 @@ function loanLine(l) {
 function positionsView(state, user, now, notice, selected) {
   const acc = game.getUser(state, user.id, null, now);
   const v = game.portfolioValue(state, acc, now);
-  const ratio = v.loans > 0 ? `\n담보비율 **${((v.assets / v.loans) * 100).toFixed(0)}%** (${game.MAINTENANCE_RATIO * 100}% 미만이면 반대매매)` : '';
-  const e = new EmbedBuilder()
-    .setTitle('📋 내 포지션')
-    .setColor(COLOR_INFO)
-    .addFields(
-      { name: `⚡ 선물 (${acc.futures.length})`, value: clip(acc.futures.map((p) => futuresLine(state, p)).join('\n') || '없음') },
-      { name: `🎯 옵션 (${acc.options.length})`, value: clip(acc.options.map((o) => optionLine(state, o, now)).join('\n') || '없음') },
-      { name: `💳 대출 (${won(v.loans)})`, value: clip((acc.loans.map(loanLine).join('\n') || '없음') + ratio) },
-    );
-  const components = [];
-  const choices = [
-    ...acc.futures.map((p) => ({
-      label: clipLabel(`#${p.id} 선물 ${findAsset(p.asset)?.name || p.asset} ${p.side > 0 ? '롱' : '숏'} ${p.leverage}배`),
-      value: `f:${p.id}`,
-      description: `증거금 ${won(p.margin)}`,
-    })),
-    ...acc.options.map((o) => ({
-      label: clipLabel(`#${o.id} 옵션 ${findAsset(o.asset)?.name || o.asset} ${o.kind === 'call' ? '콜' : '풋'}`),
-      value: `o:${o.id}`,
-      description: `행사가 ${won(o.strike)}`,
-    })),
-  ].slice(0, 25);
+  const ratio = v.loans > 0 ? v.assets / v.loans : null;
+
+  // 정리 확인 화면
   if (selected) {
-    const [kind, pid] = selected.split(':');
-    const label = choices.find((c) => c.value === selected)?.label || `#${pid}`;
-    e.setFooter({ text: `선택: ${label} — 정리하려면 확인을 눌러 주세요` });
-    components.push(row(
-      btn(id('closeok', selected), kind === 'f' ? '선물 청산 확인' : '옵션 매도 확인', ButtonStyle.Danger, { emoji: '✅' }),
-      btn(id('pos'), '취소', ButtonStyle.Secondary),
-    ));
-  } else if (choices.length) {
-    components.push(row(new StringSelectMenuBuilder()
-      .setCustomId(id('close'))
-      .setPlaceholder('정리할 선물·옵션 선택')
-      .addOptions(choices)));
+    const [kind, pid] = String(selected).split(':');
+    const item = kind === 'f' ? acc.futures.find((x) => String(x.id) === pid) : acc.options.find((x) => String(x.id) === pid);
+    if (item) {
+      const detail = kind === 'f' ? futuresLine(state, item) : optionLine(state, item, now);
+      const value = kind === 'f' ? game.futuresEquity(state, item) : game.optionValue(state, item, now);
+      return {
+        v2: [
+          v2.noticeContainer(notice),
+          v2.container(COLOR_ERR, [
+            v2.text(`## ${kind === 'f' ? '⚡ 선물 청산' : '🎯 옵션 매도'} 확인\n${detail}\n\n지금 정리하면 약 **${won(value)}**을 돌려받아요 (수수료 별도).`),
+            row(
+              btn(id('closeok', selected), kind === 'f' ? '청산하기' : '매도하기', ButtonStyle.Danger, { emoji: '✅' }),
+              btn(id('pos'), '취소', ButtonStyle.Secondary),
+            ),
+          ]),
+        ],
+      };
+    }
   }
-  components.push(row(
-    btn(id('repay'), '대출 상환', ButtonStyle.Primary, { emoji: '💳', disabled: v.loans <= 0 }),
-    btn(id('pf'), '내 자산', ButtonStyle.Secondary, { emoji: '💼' }),
-    homeBtn(),
-  ));
-  return { embeds: withNotice(notice, [e]), components };
+
+  const items = [
+    ...acc.futures.map((p) => {
+      const price = quote(state.market, p.asset)?.price ?? p.entry;
+      const pnl = game.futuresPnl(p, price);
+      return v2.section(futuresLine(state, p).replace('\n　', '\n-# '),
+        { button: btn(id('closeb', `f:${p.id}`), `${signedWon(pnl)} · 청산`, changeStyle(pnl)) });
+    }),
+    ...acc.options.map((o) => {
+      const val = game.optionValue(state, o, now);
+      const pnl = val - o.premium * o.qty;
+      return v2.section(optionLine(state, o, now).replace('\n　', '\n-# '),
+        { button: btn(id('closeb', `o:${o.id}`), `${signedWon(pnl)} · 매도`, changeStyle(pnl)) });
+    }),
+  ];
+  const SHOW = 7;
+  const restChoices = [
+    ...acc.futures.map((p) => ({ label: clipLabel(`#${p.id} 선물 ${findAsset(p.asset)?.name || p.asset} ${p.side > 0 ? '롱' : '숏'} ${p.leverage}배`), value: `f:${p.id}` })),
+    ...acc.options.map((o) => ({ label: clipLabel(`#${o.id} 옵션 ${findAsset(o.asset)?.name || o.asset} ${o.kind === 'call' ? '콜' : '풋'}`), value: `o:${o.id}` })),
+  ].slice(SHOW, SHOW + 25);
+
+  const loanText = acc.loans.length
+    ? `**💳 대출 ${won(v.loans)}**\n-# ${acc.loans.map((l) => (l.type === 'misu' ? `미수 ${won(l.amount)} (결제 ${rel(l.dueAt)})` : `신용 ${won(l.amount)}`)).join(' · ')}` +
+      (ratio ? `\n담보비율 ${v2.bar(Math.min(1, ratio / 3))} **${(ratio * 100).toFixed(0)}%** ${ratio < game.MAINTENANCE_RATIO * 1.15 ? '⚠️ 반대매매 주의' : ''}\n-# ${game.MAINTENANCE_RATIO * 100}% 미만이면 반대매매` : '')
+    : '**💳 대출** 없음';
+
+  return {
+    v2: [
+      v2.noticeContainer(notice),
+      v2.container(COLOR_INFO, [
+        v2.text(`## 📋 내 포지션\n⚡ 선물 **${acc.futures.length}건** ${won(v.futures)}　🎯 옵션 **${acc.options.length}건** ${won(v.options)}\n` +
+          `-# ${items.length ? '오른쪽 버튼(평가손익)을 누르면 정리 확인 화면이 나와요' : '선물·옵션은 종목 화면의 롱/숏/옵션 버튼으로 시작해요'}`),
+        ...items.slice(0, SHOW),
+        restChoices.length ? row(new StringSelectMenuBuilder().setCustomId(id('close')).setPlaceholder(`나머지 ${restChoices.length}건 정리하기`).addOptions(restChoices)) : null,
+        v2.sep(),
+        acc.loans.length
+          ? v2.section(loanText, { button: btn(id('repay'), '상환', ButtonStyle.Primary, { emoji: '💳' }) })
+          : v2.text(loanText),
+        v2.sep(),
+        row(
+          btn(id('pf'), '내 자산', ButtonStyle.Secondary, { emoji: '💼' }),
+          btn(id('pos'), '새로고침', ButtonStyle.Secondary, { emoji: '🔄' }),
+          homeBtn(),
+        ),
+      ]),
+    ],
+  };
 }
 
 // ── 랭킹 ─────────────────────────────────────────────────────
@@ -460,15 +513,31 @@ function rankingEmbed(state, scope, guildId, now) {
     .setDescription(rows.length ? rows.join('\n') : '아직 참가자가 없어요.');
 }
 
-function rankingView(state, scope, guildId, now, notice) {
+function rankingView(state, scope, guildId, now, notice, viewerId) {
+  const g = scope === 'guild' ? guildId : null;
+  const all = game.ranking(state, g, Infinity, now);
+  const medals = ['🥇', '🥈', '🥉'];
+  const rows = all.slice(0, 10).map((r, i) => {
+    const ret = pct(game.START_CASH, r.total);
+    return v2.section(`${medals[i] || `**${i + 1}위**`} <@${r.userId}>${r.userId === viewerId ? ' (나)' : ''}\n-# 순자산 ${won(r.total)} · ${signedWon(r.total - game.START_CASH)}`,
+      { button: btn(id('pfu', r.userId), changeLabel(ret), changeStyle(ret)) });
+  });
+  const myRank = all.findIndex((r) => r.userId === viewerId);
+  const me = myRank >= 0 ? `내 순위 **${myRank + 1}위** / ${all.length}명 · ${won(all[myRank].total)}` : `참가자 ${all.length}명`;
   return {
-    embeds: withNotice(notice, [rankingEmbed(state, scope, guildId, now)]),
-    components: [row(
-      btn(id('rank', 'all'), '전체 서버', scope === 'guild' ? ButtonStyle.Secondary : ButtonStyle.Primary),
-      btn(id('rank', 'guild'), '이 서버', scope === 'guild' ? ButtonStyle.Primary : ButtonStyle.Secondary),
-      homeBtn(),
-      btn(id('share', 'rank', scope), '채널에 공유', ButtonStyle.Success, { emoji: '📢' }),
-    )],
+    v2: [
+      v2.noticeContainer(notice),
+      v2.container(COLOR_INFO, [
+        v2.text(`## 🏆 ${scope === 'guild' ? '이 서버' : '전체 서버'} 순자산 랭킹\n${me}\n-# 오른쪽 버튼(수익률)을 누르면 그 사람의 자산을 볼 수 있어요`),
+        ...(rows.length ? rows : [v2.text('아직 참가자가 없어요.')]),
+        row(
+          btn(id('rank', 'all'), '전체 서버', scope === 'guild' ? ButtonStyle.Secondary : ButtonStyle.Primary),
+          btn(id('rank', 'guild'), '이 서버', scope === 'guild' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+          homeBtn(),
+          btn(id('share', 'rank', scope), '채널에 공유', ButtonStyle.Success, { emoji: '📢' }),
+        ),
+      ]),
+    ],
     allowedMentions: { parse: [] },
   };
 }
@@ -476,26 +545,24 @@ function rankingView(state, scope, guildId, now, notice) {
 // ── 도움말 ───────────────────────────────────────────────────
 
 function helpView() {
-  const e = new EmbedBuilder()
-    .setTitle('📘 주식 게임 도움말')
-    .setColor(COLOR_INFO)
-    .setDescription(
-      `처음 쓰면 **${won(game.START_CASH)}**으로 계좌가 열려요. 계좌는 봇이 있는 **모든 서버에서 공용**이에요.\n` +
-      `실제 시세 ${ASSETS.length}종목을 **24시간** 거래할 수 있어요. 장이 닫힌 종목(💤)은 마지막 종가로 거래돼요.\n​`)
-    .addFields(
-      { name: '🧭 사용법', value: '홈 → 분류 선택 또는 🔍 검색 → 종목 화면 → 주문창에서 버튼으로 수량을 고르면 결과를 미리 보여 줘요 → [실행]을 눌러야 체결돼요' },
-      { name: '🛒 현물', value: '버튼으로 수량 조절 · ✏️ 직접 입력: `10`, `0.01`, `전부`, `절반`, `30%`, `10만원`(그 금액만큼)' },
-      {
-        name: '💳 신용·미수',
-        value: `**신용**: 본인 ${game.CREDIT_MARGIN * 100}% + 대출, 연 ${game.CREDIT_RATE * 100}% 이자\n` +
-          `**미수**: 증거금 ${game.MISU_MARGIN * 100}%, ${game.MISU_DAYS}일 안에 결제 (못 하면 반대매매)\n` +
-          `대출 한도 순자산 ×${game.LOAN_LIMIT_RATIO} · 담보비율 ${game.MAINTENANCE_RATIO * 100}% 미만이면 반대매매`,
-      },
-      { name: '⚡ 선물', value: `롱=상승, 숏=하락 베팅 · 최대 ${game.MAX_LEVERAGE}배 · 손실이 증거금 ${game.LIQUIDATION_LOSS * 100}%에 닿으면 강제청산` },
-      { name: '🎯 옵션', value: '콜=오를수록, 풋=내릴수록 이익 · 손실은 산 가격까지만 · 만기(1시간/1일/1주)에 자동 정산' },
-      { name: '🔔 알림', value: '반대매매·강제청산·옵션 만기는 DM으로 알려 드려요 (서버 DM 허용 필요)' },
-    );
-  return { embeds: [e], components: [row(homeBtn())] };
+  const go = (cid, label, emoji) => btn(cid, label, ButtonStyle.Secondary, { emoji });
+  return {
+    v2: [
+      v2.container(COLOR_INFO, [
+        v2.text(`## 📘 주식 게임 도움말\n처음 쓰면 **${won(game.START_CASH)}**으로 계좌가 열려요. 계좌는 봇이 있는 **모든 서버에서 공용**이에요.\n` +
+          `실제 시세 ${ASSETS.length}종목을 **24시간** 거래해요. 💤 장 마감 종목은 마지막 종가로 거래돼요.`),
+        v2.sep(),
+        v2.section('**📈 시세 보기**\n-# 분류별 목록 → 종목 → 차트·주문', { button: go(id('list', 'kr', 0), '한국 주식', '📂') }),
+        v2.section('**🛒 현물 매수·매도**\n-# 주문창에서 버튼으로 수량을 고르면 결과를 미리 보여 주고, [실행]을 눌러야 체결돼요', { button: go(id('search'), '종목 검색', '🔍') }),
+        v2.section(`**💳 신용·미수**\n-# 신용: 내 돈 ${game.CREDIT_MARGIN * 100}% + 대출(연 ${game.CREDIT_RATE * 100}%) · 미수: 증거금 ${game.MISU_MARGIN * 100}%, ${game.MISU_DAYS}일 내 결제 · 담보비율 ${game.MAINTENANCE_RATIO * 100}% 미만이면 반대매매`, { button: go(id('pos', 'loan'), '대출 보기', '💳') }),
+        v2.section(`**⚡ 선물 (롱/숏)**\n-# 롱=상승, 숏=하락 베팅 · 최대 ${game.MAX_LEVERAGE}배 · 손실이 증거금 ${game.LIQUIDATION_LOSS * 100}%에 닿으면 강제청산`, { button: go(id('pos', 'fut'), '포지션', '📋') }),
+        v2.section('**🎯 옵션 (콜/풋)**\n-# 콜=오를수록, 풋=내릴수록 이익 · 손실은 산 가격까지만 · 만기(1시간/1일/1주)에 자동 정산', { button: go(id('pos', 'opt'), '포지션', '🎯') }),
+        v2.section(`**🏆 랭킹 · 🎁 출석**\n-# 순자산 순위 · 하루 한 번 ${won(game.DAILY_BONUS)}`, { button: go(id('rank', 'all'), '랭킹', '🏆') }),
+        v2.text('-# 🔔 반대매매·강제청산·옵션 만기는 DM으로 알려 드려요 (서버 DM 허용 필요)'),
+        row(homeBtn()),
+      ]),
+    ],
+  };
 }
 
 // ── 팝업 입력창 (모달) ────────────────────────────────────────
@@ -524,19 +591,20 @@ function repayModal() {
 // ── 검색 결과 ────────────────────────────────────────────────
 
 function searchResultView(state, query, hits, now) {
-  const e = new EmbedBuilder()
-    .setColor(COLOR_INFO)
-    .setTitle(`🔍 "${clipLabel(query, 50)}" 검색 결과 (${hits.length})`)
-    .setDescription(hits.length ? hits.map((a) => priceLine(state, a, now)).join('\n') : '찾는 종목이 없어요. 다른 이름으로 검색해 보세요.');
-  const components = [];
-  if (hits.length) {
-    components.push(row(new StringSelectMenuBuilder()
-      .setCustomId(id('pick', 'search'))
-      .setPlaceholder('📈 종목 선택 → 차트·주문')
-      .addOptions(hits.map((a) => ({ label: clipLabel(a.name), value: a.id, description: `${CATEGORIES[a.category]} · ${a.id}` })))));
-  }
-  components.push(row(btn(id('search'), '다시 검색', ButtonStyle.Primary, { emoji: '🔍' }), homeBtn()));
-  return { embeds: [e], components };
+  const shown = hits.slice(0, 8);
+  return {
+    v2: [
+      v2.container(COLOR_INFO, [
+        v2.text(`## 🔍 "${clipLabel(query, 50)}" 검색 결과 (${hits.length})\n-# ${hits.length ? '오른쪽 버튼을 누르면 차트·주문 화면' : '찾는 종목이 없어요. 다른 이름으로 검색해 보세요.'}`),
+        ...shown.map((a) => assetRow(state, a, now, 's')),
+        hits.length > shown.length ? row(new StringSelectMenuBuilder()
+          .setCustomId(id('pick', 'search'))
+          .setPlaceholder(`나머지 ${hits.length - shown.length}종목`)
+          .addOptions(hits.slice(8, 33).map((a) => ({ label: clipLabel(a.name), value: a.id, description: `${CATEGORIES[a.category]} · ${a.id}` })))) : null,
+        row(btn(id('search'), '다시 검색', ButtonStyle.Primary, { emoji: '🔍' }), homeBtn()),
+      ]),
+    ],
+  };
 }
 
 module.exports = {
