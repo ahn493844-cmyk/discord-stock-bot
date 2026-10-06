@@ -12,7 +12,14 @@ function load() {
     if (!fs.existsSync(DATA_FILE)) return createState();
     return normalizeState(JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8')));
   } catch (err) {
-    console.error('[store] 데이터 읽기 실패, 새로 시작합니다:', err.message);
+    // 원본을 덮어쓰기 전에 백업해 둔다
+    const backup = `${DATA_FILE}.broken-${Date.now()}`;
+    try {
+      fs.copyFileSync(DATA_FILE, backup);
+    } catch {
+      // 백업 실패는 무시
+    }
+    console.error(`[store] 데이터 읽기 실패, 새로 시작합니다 (백업: ${backup}):`, err);
     return createState();
   }
 }
