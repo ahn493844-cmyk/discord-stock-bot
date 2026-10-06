@@ -2,6 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const game = require('../src/game');
+
+// 출신·직업 뽑기를 고정: 동수저 · 회사원(일급 10만) · 시작 자금 100만원
+game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
 const { ASSETS, CATEGORIES } = require('../src/assets');
 const { handleCommand, handleComponent, handleModal, autocomplete, definitions } = require('../src/commands');
 
@@ -112,8 +115,8 @@ function harness(state) {
     get screen() { return screen; },
     get modal() { return modal; },
     shared,
-    async command(target) {
-      await handleCommand(base({ options: { getString: () => target ?? null } }), { state });
+    async command(target, commandName = '주식') {
+      await handleCommand(base({ commandName, options: { getString: () => target ?? null } }), { state });
       return checkMessage(screen, `/주식 ${target || ''}`);
     },
     async click(customId) {
@@ -150,8 +153,8 @@ function harness(state) {
   };
 }
 
-test('/주식 명령어는 하나뿐이다', () => {
-  assert.deepStrictEqual(definitions.map((d) => d.name), ['주식']);
+test('명령어는 /주식, /직업랜덤뽑기, /환생', () => {
+  assert.deepStrictEqual(definitions.map((d) => d.name), ['주식', '직업랜덤뽑기', '환생']);
 });
 
 test('홈 → 분류 → 페이지 이동 → 종목 → 차트 기간 전환', async () => {
@@ -317,7 +320,9 @@ test('검색·출석·랭킹·도움말·공유', async () => {
   await h.command();
   await h.click('stk|search');
   const many = await h.submit('stk|m_search', { q: '삼성' });
-  assert.ok(many.rows[0].components[0].options.length > 1);
+  assert.ok([...many.ids].filter((x) => x.startsWith('stk|a|') && x.endsWith('|s')).length > 1, '검색 결과 줄마다 버튼');
+  await h.click('stk|a|005930|1d|s');
+  assert.match(fieldsText(h.screen), /삼성전자/);
   await h.submit('stk|m_search', { q: 'AAPL' });
   assert.match(fieldsText(h.screen), /애플/);
   await h.submit('stk|m_search', { q: '없는종목zzz' });
@@ -365,17 +370,140 @@ test('선물·옵션 → 포지션에서 선택·확인으로 정리 → 대출 
   await h.click('stk|xo|005930|call|1w|5|10');
   await h.click('stk|xb|005930|credit|5');
   const pos = await h.click('stk|pos');
-  const select = pos.rows[0].components[0];
-  assert.strictEqual(select.options.length, 2);
-  const confirm = await h.pick('stk|close', select.options[0].value);
-  assert.ok([...confirm.ids].some((x) => x.startsWith('stk|closeok|')));
-  await h.click(`stk|closeok|${select.options[0].value}`);
+  const closeBtns = [...pos.ids].filter((x) => x.startsWith('stk|closeb|'));
+  assert.strictEqual(closeBtns.length, 2, '포지션 줄마다 정리 버튼');
+  assert.match(pos.text, /담보비율/);
+  const confirm = await h.click(closeBtns[0]);
+  assert.match(confirm.text, /청산 확인/);
+  const ok = [...confirm.ids].find((x) => x.startsWith('stk|closeok|'));
+  await h.click(ok);
   assert.match(h.notice(), /청산/);
-  await h.click(`stk|closeok|${select.options[1].value}`);
+  await h.click('stk|closeb|' + closeBtns[1].split('|')[2]);
+  await h.click('stk|closeok|' + closeBtns[1].split('|')[2]);
   assert.match(h.notice(), /옵션 .* 매도/);
   await h.click('stk|repay');
   await h.submit('stk|m_repay', { amount: '전부' });
   assert.match(h.notice(), /상환/);
   const u = game.getUser(state, 'u1');
   assert.strictEqual(u.futures.length + u.options.length + u.loans.length, 0);
+});
+
+test('누를 수 있는 UI: 홈 시장 버튼·목록 줄 버튼·랭킹에서 남의 자산·도움말 바로가기', async () => {
+  const state = makeState();
+  const h = harness(state);
+  const home = await h.command();
+  const heat = [...home.ids].filter((x) => x.startsWith('stk|a|') && x.endsWith('|h'));
+  assert.ok(heat.length >= 10, '홈 시장 종목 버튼');
+  await h.click(heat[0]);
+  assert.match(fieldsText(h.screen), /원/);
+
+  const list = await h.click('stk|list|kr|0');
+  const rowsBtns = [...list.ids].filter((x) => x.endsWith('|l'));
+  assert.strictEqual(rowsBtns.length, 8);
+  await h.click('stk|list|kr|6');
+
+  // 다른 사람 계좌 만들고 랭킹 → 그 사람 자산 (보기 전용)
+  game.getUser(state, 'u2', 'g1').cash = 2_000_000;
+  game.buy(state, 'u2', 'g1', 'AAPL', '1', 'cash');
+  const rank = await h.click('stk|rank|all');
+  assert.match(rank.text, /내 순위/);
+  assert.ok(rank.ids.has('stk|pfu|u2'));
+  const other = await h.click('stk|pfu|u2');
+  assert.match(other.text, /<@u2>님의 자산/);
+  assert.ok(!other.ids.has('stk|share|pf'), '남의 자산 화면엔 공유·파산 버튼 없음');
+  assert.ok(other.ids.has('stk|a|AAPL|1d|pf'));
+  await h.click('stk|pfu|nobody');
+  assert.match(h.notice(), /찾을 수 없어요/);
+
+  const help = await h.click('stk|help');
+  assert.ok(help.ids.has('stk|list|kr|0'));
+});
+
+test('포지션이 많아도 제한을 지키고 나머지는 메뉴로', async () => {
+  const state = makeState();
+  const h = harness(state);
+  game.getUser(state, 'u1', 'g1').cash = 1e9;
+  for (let i = 0; i < 20; i++) game.openFuture(state, 'u1', 'g1', 'BTC', i % 2 ? 'long' : 'short', '1만', 2);
+  for (let i = 0; i < 20; i++) game.buyOption(state, 'u1', 'g1', 'BTC', 'call', '현재가', '1w', '0.001');
+  game.buy(state, 'u1', 'g1', 'BTC', '0.01', 'misu');
+  for (const a of ASSETS.slice(0, 40)) game.buy(state, 'u1', 'g1', a.id, a.decimals ? '0.01' : '1', 'cash');
+  const pos = await h.click('stk|pos');
+  assert.ok(pos.ids.has('stk|close'));
+  await h.click('stk|pf');
+  await h.click('stk|rank|all');
+});
+
+test('처음 /주식: 운명 카드 → 출석은 직업 보상', async () => {
+  const state = makeState();
+  const h = harness(state);
+  const home = await h.command();
+  assert.match(h.notice(), /운명이 정해졌어요/);
+  assert.match(home.text, /동수저 · 💼 회사원/);
+  await h.click('stk|daily');
+  assert.match(h.notice(), /회사원 출석 보상 \*\*1,000,000원\*\*/);
+  // 두 번째부터는 운명 카드 없음
+  await h.command();
+  assert.doesNotMatch(h.notice(), /운명이 정해졌어요/);
+});
+
+test('/환생: 경고·확인 화면 → 24시간 쿨다운 → 실행하면 새 인생', async () => {
+  const state = makeState();
+  const h = harness(state);
+  await h.command();
+  game.buy(state, 'u1', 'g1', '005930', '3', 'credit');
+  // 막 태어났으면 24시간 동안 환생 불가 (버튼 비활성)
+  let c = await h.command(null, '환생');
+  assert.match(c.text, /정말 환생하시겠어요/);
+  assert.match(c.text, /사라지는 것[\s\S]*보유 종목 1개[\s\S]*대출/);
+  const rows = c.rows.flatMap((r) => r.components);
+  assert.ok(rows.find((b) => b.custom_id === 'stk|rbok').disabled);
+  await h.click('stk|rbok'); // 그래도 누르면 거절
+  assert.match(h.notice(), /24시간에 한 번/);
+  assert.ok(game.getUser(state, 'u1').holdings['005930']);
+
+  // 하루 지난 것으로
+  game.getUser(state, 'u1').lastRebirthAt -= 25 * 3600e3;
+  game.setLifeRoller(() => ({ origin: 'gold', job: 'doctor', startCash: 150_000_000 }));
+  try {
+    c = await h.click('stk|rb');
+    assert.ok(!c.rows.flatMap((r) => r.components).find((b) => b.custom_id === 'stk|rbok').disabled);
+    const done = await h.click('stk|rbok');
+    assert.match(done.text, /새로운 인생이 시작됐어요/);
+    assert.match(done.text, /금수저[\s\S]*150,000,000원[\s\S]*의사[\s\S]*4,000,000원/);
+    const u = game.getUser(state, 'u1');
+    assert.strictEqual(u.cash, 150_000_000);
+    assert.deepStrictEqual(u.holdings, {});
+    assert.strictEqual(u.loans.length, 0);
+    assert.strictEqual(u.rebirths, 1);
+    // 수익률은 새 시작 자금 기준
+    const home = await h.click('stk|home');
+    assert.match(home.text, /시작 자금 150,000,000원 대비/);
+  } finally {
+    game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
+  }
+});
+
+test('/직업랜덤뽑기: 확인 화면 → 뽑기 → 결과, 같은 날 두 번은 안 됨', async () => {
+  const state = makeState();
+  const h = harness(state);
+  await h.command();
+  let c = await h.command(null, '직업랜덤뽑기');
+  assert.match(c.text, /직업 다시 뽑기[\s\S]*지금 직업: 💼 \*\*회사원\*\*/);
+  assert.match(c.text, /아이돌 1%/);
+  game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }), () => 'jobless');
+  try {
+    const r = await h.click('stk|jrok');
+    assert.match(r.text, /새 직업: 🛋️ 백수/);
+    assert.match(r.text, /1,000,000원\*\* → \*\*100,000원/);
+    c = await h.click('stk|jr');
+    assert.ok(c.rows.flatMap((x) => x.components).find((b) => b.custom_id === 'stk|jrok').disabled);
+    await h.click('stk|jrok');
+    assert.match(h.notice(), /하루에 한 번/);
+    assert.strictEqual(game.getUser(state, 'u1').job, 'jobless');
+    // 결과 화면의 출석 버튼은 새 직업 보상
+    await h.click('stk|daily|jr');
+    assert.match(h.notice(), /백수 출석 보상 \*\*100,000원/);
+  } finally {
+    game.setLifeRoller(() => ({ origin: 'bronze', job: 'office', startCash: 1_000_000 }));
+  }
 });
